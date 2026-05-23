@@ -49,7 +49,7 @@ from autotrader_app.database import get_session
 from autotrader_app.models import OrderSide
 from autotrader_app.repositories import AccountRepository, OrderRepository, PositionRepository
 from autotrader_app.services.trading_service import TradingService
-from autotrader_app.utils import is_trading_time, next_trading_segment_start
+from autotrader_app.utils import is_trading_day, is_trading_time, next_trading_segment_start
 
 
 @dataclass(slots=True)
@@ -486,9 +486,18 @@ class MainWindow(QMainWindow):
         if not self.is_running or self.is_paused:
             return
 
+        now_bjt = datetime.now().astimezone(timezone(timedelta(hours=8)))
+
+        # P0-3: 非交易日直接跳过行情和策略
+        if not is_trading_day(now_bjt):
+            self.market_status_label.setText("状态：⛔ 非交易日")
+            return
+
+        if not is_trading_time(now_bjt):
+            self.market_status_label.setText("状态：⏸ 非交易时间")
+
         self._market_refresh_tick += 1
 
-        now_bjt = datetime.now().astimezone(timezone(timedelta(hours=8)))
         in_session = is_trading_time(now_bjt)
 
         # 非交易时间：每隔 4 个 tick（~60s）才做一次全量刷新

@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from autotrader_app.database import get_session
+from autotrader_app.broker.broker_base import BrokerBase
 from autotrader_app.models import FillResult, OrderRequest, OrderResult, OrderSide, OrderStatus
 from autotrader_app.repositories import AccountRepository, FillRepository, OrderRepository, PositionRepository
 
@@ -22,13 +23,13 @@ class AccountState:
         return self.cash + self.market_value
 
 
-class MockBroker:
-    """模拟交易柜台。"""
+class MockBroker(BrokerBase):
+    """模拟交易柜台，继承 BrokerBase 统一接口。"""
 
     def __init__(self, initial_cash: float = 100_000.0) -> None:
         self.account = AccountState(cash=initial_cash)
 
-    def submit_order(self, order: OrderRequest) -> OrderResult:
+    def _place_impl(self, order: OrderRequest) -> tuple[OrderResult, list[FillResult]]:
         with get_session() as session:
             positions = PositionRepository(session)
             orders = OrderRepository(session)
@@ -50,7 +51,26 @@ class MockBroker:
                 result.price,
                 len(fill_records),
             )
-            return result
+            return result, fill_records
+
+    def get_positions(self) -> pd.DataFrame:
+        with get_session() as session:
+            repo = PositionRepository(session)
+            rows = repo.list_all()
+            return pd.DataFrame(
+                [{"symbol": row.symbol, "quantity": row.quantity, "avg_price": row.avg_price} for row in rows]
+            )
+
+    def cancel_order(self, order_id: str) -> bool:
+        """取消委托（Mock 下直接返回 False 表示已成交不可撤）。"""
+        with get_session() as session:
+            repo = OrderRepository(session)
+            order = repo.get_by_order_id(order_id)
+            if order is None or order.status not in (OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
+                return False
+            order.status = OrderStatus.CANCELLED
+            repo.add_or_update(order)
+            return True
 
     def get_positions(self) -> pd.DataFrame:
         with get_session() as session:

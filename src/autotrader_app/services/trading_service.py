@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from loguru import logger
 
+from autotrader_app.broker.broker_base import BrokerBase
 from autotrader_app.broker.mock_broker import MockBroker
 from autotrader_app.data.providers import DataProviderFactory, DataRequest, MarketDataProvider
 from autotrader_app.models import OrderRequest, OrderSide
@@ -16,7 +17,7 @@ from autotrader_app.strategies.double_ma_strategy import DoubleMA_Strategy
 class TradingService:
     """交易服务，负责串联数据、策略和模拟下单。"""
 
-    def __init__(self, provider: MarketDataProvider | None = None, broker: MockBroker | None = None) -> None:
+    def __init__(self, provider: MarketDataProvider | None = None, broker: BrokerBase | None = None) -> None:
         self.provider = provider or DataProviderFactory.create()
         self.broker = broker or MockBroker()
         self.strategy = DoubleMA_Strategy(symbol_list=[], position_ratio=0.2)

@@ -1,0 +1,6 @@
+auto_trader.db
+src/auto_trader.db
+.env
+.venv/
+*.pyc
+__pycache__/

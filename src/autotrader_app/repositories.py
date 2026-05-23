@@ -43,6 +43,10 @@ class OrderRepository:
     def __init__(self, session):
         self.session = session
 
+    def get_by_order_id(self, order_id: str) -> OrderRecord | None:
+        stmt = select(OrderRecord).where(OrderRecord.order_id == order_id)
+        return self.session.scalar(stmt)
+
     def add(self, order: OrderResult) -> OrderRecord:
         record = OrderRecord(
             order_id=order.order_id,
