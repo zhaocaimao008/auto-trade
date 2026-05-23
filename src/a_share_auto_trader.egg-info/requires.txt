@@ -1,0 +1,13 @@
+PyQt6>=6.7
+matplotlib>=3.8
+pandas>=2.2
+numpy>=1.26
+akshare>=1.14.0
+tushare>=1.4.18
+backtrader>=1.9.78.123
+schedule>=1.2.2
+loguru>=0.7.2
+pydantic>=2.8
+pydantic-settings>=2.4
+sqlalchemy>=2.0
+python-dotenv>=1.0.1
