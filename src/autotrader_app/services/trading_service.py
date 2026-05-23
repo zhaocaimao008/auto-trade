@@ -10,17 +10,114 @@ from autotrader_app.broker.broker_base import BrokerBase
 from autotrader_app.broker.mock_broker import MockBroker
 from autotrader_app.data.providers import DataProviderFactory, DataRequest, MarketDataProvider
 from autotrader_app.models import OrderRequest, OrderSide
-from autotrader_app.strategies.base import StrategyContext, StrategySignal
+from autotrader_app.strategies.base import StrategyBase, StrategyContext, StrategySignal
 from autotrader_app.strategies.double_ma_strategy import DoubleMA_Strategy
 
 
 class TradingService:
-    """交易服务，负责串联数据、策略和模拟下单。"""
+    """交易服务，负责串联数据、策略和模拟下单。
+
+    支持单策略评估（evaluate_strategy）和多策略并行评估（run_all_strategies）。
+    策略实例可通过 register_strategy / unregister_strategy 动态注册。
+    """
 
     def __init__(self, provider: MarketDataProvider | None = None, broker: BrokerBase | None = None) -> None:
         self.provider = provider or DataProviderFactory.create()
         self.broker = broker or MockBroker()
+        # 默认双均线策略（向后兼容旧有调用）
         self.strategy = DoubleMA_Strategy(symbol_list=[], position_ratio=0.2)
+        # 多策略注册表：name -> 策略实例
+        self._strategy_registry: dict[str, StrategyBase] = {}
+
+    # ── 多策略注册管理 ─────────────────────────────────────
+
+    def register_strategy(self, strategy: StrategyBase) -> None:
+        """向服务注册一个策略实例（以 strategy.name 为 key）。"""
+        self._strategy_registry[strategy.name] = strategy
+        logger.info("Strategy registered: {}", strategy.name)
+
+    def unregister_strategy(self, name: str) -> bool:
+        """按名称移除已注册策略，返回是否成功。"""
+        if name in self._strategy_registry:
+            del self._strategy_registry[name]
+            logger.info("Strategy unregistered: {}", name)
+            return True
+        return False
+
+    def clear_strategies(self) -> None:
+        """清空所有已注册策略。"""
+        self._strategy_registry.clear()
+
+    def get_registered_strategies(self) -> list[StrategyBase]:
+        """返回当前注册的所有策略列表（副本）。"""
+        return list(self._strategy_registry.values())
+
+    # ── 多策略并行评估 ─────────────────────────────────────
+
+    def run_strategy_instance(
+        self,
+        strategy: StrategyBase,
+        symbol: str,
+        bars: pd.DataFrame | None = None,
+        days: int = 120,
+    ) -> dict:
+        """用指定策略实例对单只股票进行评估，返回决策字典。
+
+        Args:
+            strategy: 任意继承 StrategyBase 的策略实例。
+            symbol:   股票代码。
+            bars:     预先获取的行情 DataFrame；为 None 时自动拉取。
+            days:     自动拉取时回溯的交易日数。
+
+        Returns:
+            包含 signal / reason / decision / latest_bar / bar_count 的字典。
+        """
+        if bars is None or bars.empty:
+            bars = self.fetch_bars(symbol, days=days)
+
+        context = self._build_context(symbol, bars)
+        decision = strategy.run(symbol, bars, context)
+        latest = bars.iloc[-1].to_dict() if not bars.empty else {}
+        return {
+            "strategy": strategy.name,
+            "signal": decision.signal.value,
+            "reason": decision.reason,
+            "decision": decision,
+            "latest_bar": latest,
+            "bar_count": len(bars),
+        }
+
+    def run_all_strategies(
+        self,
+        symbol: str,
+        bars: pd.DataFrame | None = None,
+        days: int = 120,
+    ) -> list[dict]:
+        """对所有已注册策略并行评估同一只股票。
+
+        返回列表，每个元素对应一个策略的决策结果字典。
+        """
+        if bars is None or bars.empty:
+            bars = self.fetch_bars(symbol, days=days)
+
+        results: list[dict] = []
+        for strategy in self._strategy_registry.values():
+            try:
+                result = self.run_strategy_instance(strategy, symbol, bars=bars)
+                results.append(result)
+            except Exception as exc:
+                logger.warning("Strategy {} failed on {}: {}", strategy.name, symbol, exc)
+                results.append({
+                    "strategy": strategy.name,
+                    "signal": "HOLD",
+                    "reason": f"评估异常：{exc}",
+                    "decision": None,
+                    "latest_bar": {},
+                    "bar_count": 0,
+                })
+        return results
+
+    # ── 原有方法（向后兼容） ──────────────────────────────
 
     def fetch_bars(self, symbol: str, days: int = 120) -> pd.DataFrame:
         request = DataRequest(symbol=symbol, start=datetime.now() - timedelta(days=days), end=datetime.now())

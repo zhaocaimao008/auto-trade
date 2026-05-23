@@ -14,6 +14,8 @@ from PyQt6.QtGui import QAction, QColor, QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -54,9 +56,19 @@ from autotrader_app.utils import is_trading_day, is_trading_time, next_trading_s
 
 @dataclass(slots=True)
 class StrategyDefinition:
+    """GUI 侧的策略描述对象，驱动参数面板的显示与编辑。"""
+
     name: str
-    fast_window: int = 5
-    slow_window: int = 20
+    # ── 策略类型，决定运行时使用哪个策略类 ──────────────────
+    # 合法值："双均线" | "MACD趋势"
+    strategy_type: str = "双均线"
+    # ── 双均线 / MACD 快慢线共用参数 ────────────────────────
+    fast_window: int = 5        # 双均线：短期均线；MACD：fast_period（12）
+    slow_window: int = 20       # 双均线：长期均线；MACD：slow_period（26）
+    # ── MACD 专用参数 ────────────────────────────────────────
+    signal_period: int = 9      # MACD 信号线周期（DEA 的 EMA 周期）
+    use_ma60_filter: bool = False  # 买入时是否要求价格高于 MA60
+    # ── 公共参数 ─────────────────────────────────────────────
     lot_size: int = 100
     enabled: bool = True
 
@@ -156,8 +168,24 @@ class MainWindow(QMainWindow):
         self.backtest_engine = BacktestEngine()
 
         self.strategy_definitions: list[StrategyDefinition] = [
-            StrategyDefinition(name="双均线策略", fast_window=5, slow_window=20, lot_size=100),
-            StrategyDefinition(name="趋势突破策略", fast_window=10, slow_window=30, lot_size=200, enabled=False),
+            # 双均线策略：短期 MA5 上穿/下穿 MA20 产生信号
+            StrategyDefinition(
+                name="双均线策略",
+                strategy_type="双均线",
+                fast_window=5,
+                slow_window=20,
+                lot_size=100,
+            ),
+            # MACD 趋势策略：标准 12-26-9 参数，含 MA60 趋势过滤
+            StrategyDefinition(
+                name="MACD趋势策略",
+                strategy_type="MACD趋势",
+                fast_window=12,
+                slow_window=26,
+                signal_period=9,
+                use_ma60_filter=False,
+                lot_size=100,
+            ),
         ]
         self.watchlist: list[str] = ["000001", "600519", "000858", "601318"]
         self.latest_bar_cache: dict[str, pd.DataFrame] = {}
@@ -226,11 +254,26 @@ class MainWindow(QMainWindow):
         self.edit_strategy_button = QPushButton("编辑参数")
         self.delete_strategy_button = QPushButton("删除策略")
 
+        # 策略类型下拉（双均线 / MACD趋势）
+        self.strategy_type_combo = QComboBox()
+        self.strategy_type_combo.addItems(["双均线", "MACD趋势"])
+
+        # 公共参数输入框
         self.fast_window_input = QLineEdit("5")
         self.slow_window_input = QLineEdit("20")
         self.lot_size_input = QLineEdit("100")
         self.strategy_symbol_pool_input = QLineEdit(",".join(self.watchlist))
         self.strategy_note_input = QLineEdit("主监控股票池")
+
+        # MACD 专用参数控件
+        self.signal_period_input = QLineEdit("9")   # DEA 信号线 EMA 周期
+        self.use_ma60_filter_checkbox = QCheckBox("启用")  # MA60 趋势过滤开关
+
+        # 联动：切换策略类型时更新快慢线标签提示
+        self.strategy_type_combo.currentTextChanged.connect(self._on_strategy_type_changed)
+        # 动态标签（随策略类型改变文字）
+        self.fast_window_label = QLabel("快线周期")
+        self.slow_window_label = QLabel("慢线周期")
 
         # ── 中间：行情和 K 线 ──
         self.provider_selector = QLineEdit(get_settings().default_data_source)
@@ -332,8 +375,11 @@ class MainWindow(QMainWindow):
 
         pb = QGroupBox("参数设置")
         pf = QFormLayout()
-        pf.addRow("快线周期", self.fast_window_input)
-        pf.addRow("慢线周期", self.slow_window_input)
+        pf.addRow("策略类型", self.strategy_type_combo)
+        pf.addRow(self.fast_window_label, self.fast_window_input)
+        pf.addRow(self.slow_window_label, self.slow_window_input)
+        pf.addRow("信号线周期", self.signal_period_input)   # MACD 专用，双均线时忽略
+        pf.addRow("MA60 过滤", self.use_ma60_filter_checkbox)  # MACD 专用
         pf.addRow("每次手数", self.lot_size_input)
         pf.addRow("股票池", self.strategy_symbol_pool_input)
         pf.addRow("备注", self.strategy_note_input)
@@ -412,6 +458,32 @@ class MainWindow(QMainWindow):
         layout.addWidget(ord_box, 2)
         layout.addWidget(fill_box, 2)
         return panel
+
+    # ── 策略类型联动辅助 ──────────────────────────────────
+
+    def _on_strategy_type_changed(self, strategy_type: str) -> None:
+        """策略类型下拉切换时，更新快/慢线标签文字及默认参数提示。"""
+        self._update_param_labels(strategy_type)
+        if strategy_type == "MACD趋势":
+            # 切到 MACD 时，如果参数还是双均线默认值（5/20）则自动替换成 MACD 标准参数
+            if self.fast_window_input.text() == "5" and self.slow_window_input.text() == "20":
+                self.fast_window_input.setText("12")
+                self.slow_window_input.setText("26")
+                self.signal_period_input.setText("9")
+        else:
+            # 切回双均线时，如果参数还是 MACD 默认值则自动还原
+            if self.fast_window_input.text() == "12" and self.slow_window_input.text() == "26":
+                self.fast_window_input.setText("5")
+                self.slow_window_input.setText("20")
+
+    def _update_param_labels(self, strategy_type: str) -> None:
+        """根据策略类型修改参数面板中快/慢线的标签文字。"""
+        if strategy_type == "MACD趋势":
+            self.fast_window_label.setText("快线周期(EMA)")
+            self.slow_window_label.setText("慢线周期(EMA)")
+        else:
+            self.fast_window_label.setText("快线周期(MA)")
+            self.slow_window_label.setText("慢线周期(MA)")
 
     # ── 事件绑定 ───────────────────────────────────────────
 
@@ -528,46 +600,107 @@ class MainWindow(QMainWindow):
     # ── 策略 ────────────────────────────────────────────────
 
     def refresh_strategy_list(self) -> None:
+        """刷新左侧策略列表，显示启用状态和策略类型图标。"""
         self.strategy_list.clear()
         for s in self.strategy_definitions:
-            tag = "🟢" if s.enabled else "⚪"
-            self.strategy_list.addItem(f"{tag} {s.name}")
+            status_tag = "🟢" if s.enabled else "⚪"
+            # 用不同图标区分策略类型，方便一眼识别
+            type_tag = "📊" if s.strategy_type == "MACD趋势" else "📈"
+            self.strategy_list.addItem(f"{status_tag} {type_tag} {s.name}")
         if self.strategy_definitions:
             self.strategy_list.setCurrentRow(0)
 
     def on_strategy_selected(self, row: int) -> None:
+        """策略选中时，将对应参数填入参数面板控件。"""
         if row < 0 or row >= len(self.strategy_definitions):
             return
         s = self.strategy_definitions[row]
+
+        # 切换策略类型下拉（不触发联动信号，手动更新标签）
+        idx = self.strategy_type_combo.findText(s.strategy_type)
+        if idx >= 0:
+            self.strategy_type_combo.setCurrentIndex(idx)
+        self._update_param_labels(s.strategy_type)
+
+        # 填入各项参数
         self.fast_window_input.setText(str(s.fast_window))
         self.slow_window_input.setText(str(s.slow_window))
+        self.signal_period_input.setText(str(s.signal_period))
+        self.use_ma60_filter_checkbox.setChecked(s.use_ma60_filter)
         self.lot_size_input.setText(str(s.lot_size))
         self.strategy_note_input.setText("启用" if s.enabled else "停用")
 
     def add_strategy(self) -> None:
-        name, ok = QInputDialog.getText(self, "添加策略", "策略名称")
+        """添加策略：先选类型，再输入名称，按类型设置默认参数。"""
+        # 第一步：选择策略类型
+        strategy_types = ["双均线", "MACD趋势"]
+        type_choice, ok = QInputDialog.getItem(
+            self, "添加策略", "选择策略类型：", strategy_types, 0, False
+        )
+        if not ok:
+            return
+
+        # 第二步：输入策略名称
+        default_name = "MACD趋势策略" if type_choice == "MACD趋势" else "双均线策略"
+        name, ok = QInputDialog.getText(self, "添加策略", "策略名称：", text=default_name)
         if not ok or not name.strip():
             return
-        self.strategy_definitions.append(StrategyDefinition(name=name.strip()))
+
+        # 根据类型设置合理默认参数
+        if type_choice == "MACD趋势":
+            defn = StrategyDefinition(
+                name=name.strip(),
+                strategy_type="MACD趋势",
+                fast_window=12,
+                slow_window=26,
+                signal_period=9,
+                use_ma60_filter=False,
+                lot_size=100,
+            )
+        else:
+            defn = StrategyDefinition(
+                name=name.strip(),
+                strategy_type="双均线",
+                fast_window=5,
+                slow_window=20,
+                lot_size=100,
+            )
+
+        self.strategy_definitions.append(defn)
         self.refresh_strategy_list()
-        self.log(f"新增策略：{name.strip()}")
+        # 自动选中新策略
+        self.strategy_list.setCurrentRow(len(self.strategy_definitions) - 1)
+        self.log(f"新增策略：{name.strip()}（{type_choice}）")
 
     def edit_selected_strategy(self) -> None:
+        """将参数面板当前值保存回选中的 StrategyDefinition。"""
         row = self.strategy_list.currentRow()
         if row < 0:
             QMessageBox.information(self, "提示", "请先选择一个策略。")
             return
         s = self.strategy_definitions[row]
         try:
+            s.strategy_type = self.strategy_type_combo.currentText()
             s.fast_window = int(self.fast_window_input.text().strip())
             s.slow_window = int(self.slow_window_input.text().strip())
+            s.signal_period = int(self.signal_period_input.text().strip())
+            s.use_ma60_filter = self.use_ma60_filter_checkbox.isChecked()
             s.lot_size = int(self.lot_size_input.text().strip())
             s.enabled = True
         except ValueError:
-            QMessageBox.warning(self, "参数错误", "请填写有效的整数。")
+            QMessageBox.warning(self, "参数错误", "请填写有效的整数参数。")
             return
+
         self.refresh_strategy_list()
-        self.log(f"策略已更新：{s.name} (MA{s.fast_window}/{s.slow_window}, 每手{s.lot_size}股)")
+        # 构造参数摘要日志
+        if s.strategy_type == "MACD趋势":
+            param_desc = (
+                f"MACD {s.fast_window}/{s.slow_window}/{s.signal_period}"
+                + ("＋MA60过滤" if s.use_ma60_filter else "")
+            )
+        else:
+            param_desc = f"MA{s.fast_window}/{s.slow_window}"
+        self.log(f"策略已更新：{s.name} ({param_desc}，每手 {s.lot_size} 股)")
 
     def delete_selected_strategy(self) -> None:
         row = self.strategy_list.currentRow()
@@ -693,17 +826,21 @@ class MainWindow(QMainWindow):
     # ── 策略评估与自动执行 ─────────────────────────────────
 
     def _evaluate_all_strategies(self) -> None:
-        """遍历所有启用的策略，对监控列表中的每只股票评估信号并自动执行。"""
-        new_signals: dict[str, dict] = {}
-        any_action = False
+        """遍历所有启用的策略，对监控列表中的每只股票评估信号并自动执行。
 
+        支持双均线与 MACD 趋势两种策略类型，按 StrategyDefinition.strategy_type
+        动态选择策略类，复用同一套上下文构建、风控、下单流程。
+        """
         from autotrader_app.strategies.base import StrategyContext, StrategySignal
         from autotrader_app.strategies.double_ma_strategy import DoubleMA_Strategy
+        from autotrader_app.strategies.macd_strategy import MACDStrategy
 
-        # 先确保缓存是最新的（60s 间隔，不会每个 tick 都查 DB）
+        new_signals: dict[str, dict] = {}
+
+        # 先确保持仓缓存是最新的（60s 间隔，不会每个 tick 都查 DB）
         self._refresh_position_cache()
 
-        # 从缓存构建持仓 + 市值的映射
+        # 从缓存构建持仓映射与当前市值
         positions: dict[str, int] = {}
         market_value = 0.0
         for sym, info in self._position_cache.items():
@@ -722,13 +859,26 @@ class MainWindow(QMainWindow):
                     if bars is None or bars.empty:
                         continue
 
-                    temp_strategy = DoubleMA_Strategy(
-                        short_window=strategy.fast_window,
-                        long_window=strategy.slow_window,
-                        symbol_list=self.watchlist,
-                        position_ratio=0.2,
-                    )
+                    # ── 按策略类型实例化对应策略类 ──────────
+                    if strategy.strategy_type == "MACD趋势":
+                        temp_strategy = MACDStrategy(
+                            fast_period=strategy.fast_window,
+                            slow_period=strategy.slow_window,
+                            signal_period=strategy.signal_period,
+                            use_ma60_filter=strategy.use_ma60_filter,
+                            symbol_list=self.watchlist,
+                            position_ratio=0.2,
+                        )
+                    else:
+                        # 默认：双均线
+                        temp_strategy = DoubleMA_Strategy(
+                            short_window=strategy.fast_window,
+                            long_window=strategy.slow_window,
+                            symbol_list=self.watchlist,
+                            position_ratio=0.2,
+                        )
 
+                    # ── 构建账户上下文 ───────────────────────
                     latest_prices: dict[str, float] = {}
                     if not bars.empty:
                         latest_prices[symbol] = float(bars.iloc[-1]["close"])
@@ -746,29 +896,29 @@ class MainWindow(QMainWindow):
                         latest_prices=latest_prices,
                     )
 
+                    # ── 生成信号 ─────────────────────────────
                     decision = temp_strategy.generate_signal(symbol, bars, context)
 
-                    signal_info = {
+                    # 用 "策略名+股票代码" 作 key，允许多策略同时监控同一只股票
+                    cache_key = f"{strategy.name}|{symbol}"
+                    new_signals[cache_key] = {
                         "symbol": symbol,
                         "signal": decision.signal.value,
                         "price": decision.price,
                         "reason": decision.reason,
                         "time": datetime.now().strftime("%H:%M:%S"),
                         "strategy": strategy.name,
+                        "strategy_type": strategy.strategy_type,
                     }
-                    new_signals[symbol] = signal_info
 
-                    # 引擎运行时自动执行
+                    # ── 引擎运行时自动执行 ───────────────────
                     if self.is_running and not self.is_paused:
                         self._auto_execute(symbol, decision)
-
-                    if decision.signal.value in ("BUY", "SELL"):
-                        any_action = True
 
                 except Exception as exc:
                     self.log(f"[{strategy.name}] {symbol} 评估失败：{exc}")
 
-        # 更新信号缓存
+        # 更新信号缓存并刷新 UI
         self.signal_cache.update(new_signals)
         self.refresh_signal_table()
 
@@ -802,28 +952,48 @@ class MainWindow(QMainWindow):
                 self.log(f"🤖 自动卖出 {symbol} 失败：{exc}")
 
     def refresh_signal_table(self) -> None:
-        """刷新信号面板。"""
+        """刷新信号面板。
+
+        信号表列：代码 | 策略 | 信号 | 价格 | 原因（截断）| 时间
+        """
         if not self.signal_cache:
             self.signal_table.setRowCount(0)
             return
 
-        symbols = list(self.signal_cache.keys())
-        self.signal_table.setRowCount(len(symbols))
-        for r, sym in enumerate(symbols):
-            info = self.signal_cache[sym]
+        # 重新设为 6 列（新增"策略"列）
+        if self.signal_table.columnCount() != 6:
+            self.signal_table.setColumnCount(6)
+            self.signal_table.setHorizontalHeaderLabels(
+                ["代码", "策略", "信号", "价格", "原因", "时间"]
+            )
+            self.signal_table.horizontalHeader().setStretchLastSection(False)
+            self.signal_table.horizontalHeader().setSectionResizeMode(
+                4, QHeaderView.ResizeMode.Stretch
+            )
+
+        keys = list(self.signal_cache.keys())
+        self.signal_table.setRowCount(len(keys))
+        for r, key in enumerate(keys):
+            info = self.signal_cache[key]
             sig = info.get("signal", "HOLD")
             color = self.SIGNAL_COLORS.get(sig, QColor("#9ca3af"))
 
+            # 策略类型标识
+            s_type = info.get("strategy_type", "")
+            type_icon = "📊" if s_type == "MACD趋势" else "📈"
+            strategy_label = f"{type_icon} {info.get('strategy', '')}"
+
             items = [
-                QTableWidgetItem(sym),
+                QTableWidgetItem(info.get("symbol", key)),
+                QTableWidgetItem(strategy_label),
                 QTableWidgetItem(sig),
                 QTableWidgetItem(f"{info.get('price', 0):.2f}"),
-                QTableWidgetItem(info.get("reason", "")[:30]),
+                QTableWidgetItem(info.get("reason", "")[:40]),
                 QTableWidgetItem(info.get("time", "")),
             ]
-            # 信号列染色
-            items[1].setForeground(QBrush(color))
-            items[1].setFont(self._bold_font())
+            # 信号列（第 2 列）染色加粗
+            items[2].setForeground(QBrush(color))
+            items[2].setFont(self._bold_font())
 
             for c, item in enumerate(items):
                 self.signal_table.setItem(r, c, item)
