@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 
 from autotrader_app.backtest.engine import BacktestEngine
 from autotrader_app.broker.mock_broker import MockBroker
-from autotrader_app.config import BASE_DIR, get_settings
+from autotrader_app.config import BASE_DIR, check_config, get_settings
 from autotrader_app.data.providers import DataProviderFactory
 from autotrader_app.database import get_session
 from autotrader_app.models import OrderSide
@@ -212,6 +212,10 @@ class MainWindow(QMainWindow):
         self.refresh_account_views()
         self.refresh_signal_table()
         self.refresh_equity_curve()          # 启动时加载历史权益曲线（如有）
+
+        # 配置状态检查
+        for warn in check_config():
+            self.log(f"⚠️ {warn}")
         self.log("系统启动完成。初始监控: " + ", ".join(self.watchlist))
 
     # ── 菜单 ────────────────────────────────────────────────
@@ -1164,8 +1168,35 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec():
-            self.log("配置对话框已确认（未自动回写 .env）。")
-            self.provider_status_label.setText(f"数据源：{dialog.data_source_input.text().strip() or 'akshare'}")
+            # 回写 .env 文件
+            env_path = BASE_DIR / ".env"
+            token = dialog.tushare_token_input.text().strip()
+            ds = dialog.data_source_input.text().strip() or "akshare"
+            try:
+                lines = []
+                if env_path.exists():
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                # 更新或追加 TUSHARE_TOKEN
+                found_token = found_ds = False
+                for i, line in enumerate(lines):
+                    if line.startswith("TUSHARE_TOKEN="):
+                        lines[i] = f"TUSHARE_TOKEN={token}"
+                        found_token = True
+                    elif line.startswith("DEFAULT_DATA_SOURCE="):
+                        lines[i] = f"DEFAULT_DATA_SOURCE={ds}"
+                        found_ds = True
+                if not found_token:
+                    lines.append(f"TUSHARE_TOKEN={token}")
+                if not found_ds:
+                    lines.append(f"DEFAULT_DATA_SOURCE={ds}")
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                # 清除配置缓存，下次读取为新值
+                get_settings.cache_clear()
+                self.log("配置已保存到 .env 文件。")
+            except Exception as exc:
+                self.log(f"保存配置失败：{exc}")
+
+            self.provider_status_label.setText(f"数据源：{ds}"))
 
     def export_logs(self) -> None:
         target, _ = QFileDialog.getSaveFileName(self, "导出日志",

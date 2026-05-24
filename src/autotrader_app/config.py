@@ -34,3 +34,17 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def check_config() -> list[str]:
+    """检查配置，返回所有警告消息列表（空列表 = 一切正常）。"""
+    warnings: list[str] = []
+    settings = get_settings()
+
+    if not settings.tushare_token:
+        warnings.append("TUSHARE_TOKEN 未配置，Tushare 数据源不可用，使用 AKShare 作为默认数据源。")
+
+    if settings.default_data_source not in ("akshare", "tushare"):
+        warnings.append(f"未知数据源 '{settings.default_data_source}'，将使用 AKShare。")
+
+    return warnings
