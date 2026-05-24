@@ -19,6 +19,15 @@ app = Flask(__name__)
 ADMIN_PASSWORD = "gutao20080"
 DB_FILE = Path(__file__).parent / "licenses.json"
 QR_FILE = Path(__file__).parent / "qrcode.png"
+CONFIG_FILE = Path(__file__).parent / "shop_config.json"
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        return json.loads(CONFIG_FILE.read_text("utf-8"))
+    return {"contact": "你的微信号", "contact_name": "客服"}
+
+def save_config(cfg: dict) -> None:
+    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False), "utf-8")
 
 
 def load() -> dict:
@@ -190,6 +199,25 @@ def upload_qrcode():
 
 
 # ────────────────────────────────────────────────────────────
+# 客服配置
+# ────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/config", methods=["GET"])
+def get_config():
+    cfg = load_config()
+    cfg["has_qrcode"] = QR_FILE.exists()
+    return jsonify(cfg)
+
+@app.route("/api/auth/config/save", methods=["POST"])
+def save_config_api():
+    data = request.get_json(force=True, silent=True)
+    if not data or data.get("admin_key") != ADMIN_PASSWORD:
+        return jsonify({"success": False, "message": "管理员密码错误"}), 200
+    save_config({"contact": data.get("contact", ""), "contact_name": data.get("contact_name", "客服")})
+    return jsonify({"success": True, "message": "已保存"})
+
+
+# ────────────────────────────────────────────────────────────
 # 商品配置
 # ────────────────────────────────────────────────────────────
 
@@ -270,10 +298,11 @@ h1{color:#f8fafc;margin-bottom:4px}
 <p class="step">1. 使用微信/支付宝扫码付款</p>
 <p class="step">2. 添加客服微信发送付款截图</p>
 <p class="step">3. 客服发送授权码给你</p>
-<p class="contact">客服微信：你的微信号</p>
+<p class="contact" id="contactDisplay">客服微信：加载中...</p>
 </div>
 </div>
 <script>
+fetch('/api/auth/config').then(r=>r.json()).then(c=>{if(c.contact)document.getElementById('contactDisplay').textContent='客服微信：'+c.contact+' ('+(c.contact_name||'客服')+')';});
 fetch('/api/auth/products').then(r=>r.json()).then(d=>{
     document.getElementById('products').innerHTML = d.products.map(p =>
         '<div class=product onclick="sel('+p.id+',this)"><span class=name>'+p.name+'</span><span class=price>'+p.price+' 元</span></div>'
@@ -364,6 +393,14 @@ th { color:#94a3b8; font-weight:500; font-size:12px; text-transform:uppercase; }
 </div>
 
 <div class="card">
+<h3>💬 客服配置</h3>
+<div class="row"><label>微信号</label><input type="text" id="contactInput" style="width:200px"></div>
+<div class="row"><label>名称</label><input type="text" id="contactNameInput" style="width:200px" placeholder="客服"></div>
+<div class="row"><button class="btn btn-success" onclick="saveContact()">保存</button></div>
+<div id="contactStatus"></div>
+</div>
+
+<div class="card">
 <h3>🛒 商品配置</h3>
 <p class="sub" style="margin-bottom:8px">客户在购买页面看到的商品列表</p>
 <div id="productList"></div>
@@ -436,6 +473,18 @@ async function loadQR() {
     const r = await fetch('/api/auth/qrcode');
     if (r.ok) { document.getElementById('qrImg').src = '/api/auth/qrcode?' + Date.now(); document.getElementById('qrPreview').style.display = 'block'; }
 }
+async function loadContact() {
+    const r = await fetch('/api/auth/config'); const d = await r.json();
+    if(d.contact) { document.getElementById('contactInput').value = d.contact; }
+    if(d.contact_name) { document.getElementById('contactNameInput').value = d.contact_name; }
+}
+async function saveContact() {
+    const contact = document.getElementById('contactInput').value;
+    const name = document.getElementById('contactNameInput').value;
+    const r = await fetch('/api/auth/config/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({admin_key:PWD, contact, contact_name:name})});
+    const d = await r.json();
+    document.getElementById('contactStatus').innerHTML = d.success ? '✅ 已保存' : '❌ 失败';
+}
 async function loadProducts() {
     const r = await fetch('/api/auth/products'); const d = await r.json(); if(!d.success) return;
     const list = document.getElementById('productList');
@@ -448,7 +497,7 @@ async function saveProducts() {
     const r = await fetch('/api/auth/products/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_key:PWD,products:ps})});
     const j = await r.json(); document.getElementById('productStatus').innerHTML = j.success ? '✅ 已保存' : '❌ 失败';
 }
-loadQR(); loadProducts();
+loadQR(); loadContact(); loadProducts();
 loadList();
 </script>
 </body></html>"""
