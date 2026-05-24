@@ -132,15 +132,13 @@ class TradeExecutor(BrokerBase):
             fills = FillRepository(session)
             accounts = AccountRepository(session)
 
-            orders.add_or_update(order_result)
-
             fill_price = self._resolve_fill_price(order)
             valid, reason = self._validate_order(order, fill_price, positions)
             if not valid:
                 order_result.price = fill_price
                 order_result.status = OrderStatus.REJECTED
                 order_result.reason = reason
-                orders.add_or_update(order_result)
+                orders.add(order_result)
                 self.open_orders.pop(order_result.order_id, None)
                 return order_result, []
 
@@ -148,7 +146,7 @@ class TradeExecutor(BrokerBase):
             generated_fills = self._fill_order(order_result, positions)
             order_result.status = OrderStatus.FILLED
             order_result.reason = "撮合成功"
-            orders.add_or_update(order_result)
+            orders.add(order_result)
 
             for fill in generated_fills:
                 fills.add(fill)
@@ -229,3 +227,8 @@ class TradeExecutor(BrokerBase):
         for position in repo.list_all():
             total += position.quantity * position.avg_price
         self.account.market_value = total
+
+    # ── BrokerBase 抽象方法实现 ────────────────────────────
+
+    def _place_impl(self, order: OrderRequest) -> tuple[OrderResult, list[FillResult]]:
+        return self.place_order(order)
