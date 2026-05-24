@@ -63,25 +63,36 @@ def get_settings() -> Settings:
 
 
 def check_config() -> list[str]:
-    """检查配置，返回所有警告消息列表（空列表 = 一切正常）。"""
-    warnings: list[str] = []
+    """检查配置，返回配置状态报告列表（含正常信息与警告）。"""
+    reports: list[str] = []
     settings = get_settings()
 
-    if not settings.tushare_token:
-        warnings.append("TUSHARE_TOKEN 未配置，Tushare 数据源不可用，使用 AKShare 作为默认数据源。")
-
-    if settings.default_data_source not in ("akshare", "tushare"):
-        warnings.append(f"未知数据源 '{settings.default_data_source}'，将使用 AKShare。")
-
-    # EasyTrader 实盘检查
-    if settings.is_live_trading:
-        if not settings.easytrader_account:
-            warnings.append("⚠️ 实盘模式：EASYTRADER_ACCOUNT 未配置！")
-        if not settings.easytrader_exe_path:
-            warnings.append("⚠️ 实盘模式：EASYTRADER_EXE_PATH 未配置！")
-        warnings.append("🔴 实盘模式已启用，请确认已理解风险！")
+    # ── 数据源 ──────────────────────────────────────────
+    if settings.default_data_source == "akshare":
+        reports.append("数据源: AKShare（默认）")
+    elif settings.default_data_source == "tushare":
+        if not settings.tushare_token:
+            reports.append("⚠️ TUSHARE_TOKEN 未配置，Tushare 不可用，使用 AKShare")
+        else:
+            reports.append("数据源: Tushare Pro（已配置）")
     else:
-        if settings.broker_type not in ("mock", "easytrader"):
-            warnings.append(f"未知 BROKER_TYPE '{settings.broker_type}'，将使用 MockBroker。")
+        reports.append(f"⚠️ 未知数据源 '{settings.default_data_source}'，使用 AKShare")
 
-    return warnings
+    # ── Broker ──────────────────────────────────────────
+    reports.append(f"Broker: {settings.broker_type}")
+
+    if settings.broker_type == "easytrader":
+        reports.append("🔴 实盘模式已启用")
+        if not settings.easytrader_account:
+            reports.append("  ❌ EASYTRADER_ACCOUNT 未配置")
+        else:
+            reports.append(f"  ✅ 账号已配置")
+        if not settings.easytrader_exe_path:
+            reports.append("  ❌ EASYTRADER_EXE_PATH 未配置")
+        else:
+            reports.append(f"  ✅ 客户端路径已配置")
+        reports.append(f"  券商类型: {settings.easytrader_broker_type or 'ht'}")
+    else:
+        reports.append("✅ 模拟模式，无资金风险")
+
+    return reports

@@ -107,6 +107,7 @@ class SettingsDialog(QDialog):
         self.live_checkbox = QCheckBox("启用实盘交易（本软件不承担任何损失）")
         self.live_checkbox.setChecked(settings.is_live_trading)
         self.live_checkbox.setStyleSheet("color:#ef4444; font-weight:bold;")
+        self.live_checkbox.toggled.connect(self._on_live_toggled)
 
         # Broker 类型联动
         self.broker_type_combo.currentTextChanged.connect(self._on_broker_type_changed)
@@ -158,6 +159,42 @@ class SettingsDialog(QDialog):
             if w.title() == "EasyTrader 配置":
                 w.setVisible(is_et)
                 break
+
+    def _on_live_toggled(self, checked: bool) -> None:
+        """实盘复选框切换时弹出引导确认对话框。"""
+        if not checked:
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("⚠️ 切换到实盘模式")
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setText(
+            "<h2 style='color:#ef4444;'>🔴 即将切换到实盘模式</h2>"
+            "<p>启用后，以下内容将<strong>立即生效</strong>：</p>"
+            "<ul>"
+            "<li>所有手动下单操作将发送<strong>真实委托</strong>到券商</li>"
+            "<li>策略引擎产生的买卖信号可能发送<strong>真实委托</strong></li>"
+            "<li>下单前会弹出<strong>资金影响预览</strong>和<strong>二次确认</strong></li>"
+            "<li>风控规则（白名单/金额限制/间隔限制）<strong>始终生效</strong></li>"
+            "</ul>"
+            "<p style='color:#ef4444;'><strong>请确保：</strong></p>"
+            "<ol>"
+            "<li>已在模拟模式下充分测试策略和风控</li>"
+            "<li>已设置股票池白名单和金额上限</li>"
+            "<li>已阅读 docs/go_live_checklist.md 并逐项确认</li>"
+            "<li>账户中只有愿意亏损的资金</li>"
+            "</ol>"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        msg.exec()
+
+        if msg.result() != QMessageBox.StandardButton.Yes:
+            self.live_checkbox.blockSignals(True)
+            self.live_checkbox.setChecked(False)
+            self.live_checkbox.blockSignals(False)
 
     def _browse_exe(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择券商客户端", "", "Executable (*.exe);;All Files (*)")
@@ -270,7 +307,8 @@ class MainWindow(QMainWindow):
         self._position_cache: dict[str, dict] = {}  # symbol -> {quantity, avg_price}
         self._position_cache_ts: float = 0.0  # 上一次刷新持仓的时间戳
         self._live_warning_label: QLabel | None = None
-        self._trusted_mode: bool = False  # True 时实盘自动执行跳过二次确认
+        self._trusted_mode: bool = False
+        self._last_signal: dict[str, dict] = {}
 
         self._build_menu()
         self._build_status_bar()
@@ -287,8 +325,9 @@ class MainWindow(QMainWindow):
         self.refresh_equity_curve()          # 启动时加载历史权益曲线（如有）
 
         # 配置状态检查与实盘警告
-        for warn in check_config():
-            self.log(f"⚠️ {warn}")
+        self.log("━━━ 系统配置 ━━━")
+        for report in check_config():
+            self.log(f"  {report}")
         self._update_live_warning()
 
         # 定时调度服务（按 A 股交易时段自动启停引擎）
@@ -1318,6 +1357,14 @@ class MainWindow(QMainWindow):
 
         if decision.signal == StrategySignal.HOLD:
             return
+
+        # 信号去重：同一策略+股票+方向 60s 内不重复
+        signal_key = f"{strategy_name}|{symbol}|{decision.signal.value}"
+        last = self._last_signal.get(signal_key)
+        now_ts = time()
+        if last is not None and (now_ts - last["ts"]) < 60 and last["signal"] == decision.signal.value:
+            return
+        self._last_signal[signal_key] = {"signal": decision.signal.value, "ts": now_ts}
 
         desc = (
             f"[{strategy_name}] {'买入' if decision.signal == StrategySignal.BUY else '卖出'} "
