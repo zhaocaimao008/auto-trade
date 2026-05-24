@@ -63,14 +63,21 @@ class StrategyDefinition:
 
     name: str
     # ── 策略类型，决定运行时使用哪个策略类 ──────────────────
-    # 合法值："双均线" | "MACD趋势"
+    # 合法值："双均线" | "MACD趋势" | "RSI" | "布林带"
     strategy_type: str = "双均线"
     # ── 双均线 / MACD 快慢线共用参数 ────────────────────────
     fast_window: int = 5        # 双均线：短期均线；MACD：fast_period（12）
     slow_window: int = 20       # 双均线：长期均线；MACD：slow_period（26）
     # ── MACD 专用参数 ────────────────────────────────────────
-    signal_period: int = 9      # MACD 信号线周期（DEA 的 EMA 周期）
-    use_ma60_filter: bool = False  # 买入时是否要求价格高于 MA60
+    signal_period: int = 9
+    use_ma60_filter: bool = False
+    # ── RSI 专用参数 ──────────────────────────────────────────
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+    # ── 布林带专用参数 ────────────────────────────────────────
+    bb_window: int = 20
+    bb_num_std: float = 2.0
     # ── 公共参数 ─────────────────────────────────────────────
     lot_size: int = 100
     enabled: bool = True
@@ -278,24 +285,10 @@ class MainWindow(QMainWindow):
         self.risk_manager = RiskManager(initial_cash=self._initial_cash)
 
         self.strategy_definitions: list[StrategyDefinition] = [
-            # 双均线策略：短期 MA5 上穿/下穿 MA20 产生信号
-            StrategyDefinition(
-                name="双均线策略",
-                strategy_type="双均线",
-                fast_window=5,
-                slow_window=20,
-                lot_size=100,
-            ),
-            # MACD 趋势策略：标准 12-26-9 参数，含 MA60 趋势过滤
-            StrategyDefinition(
-                name="MACD趋势策略",
-                strategy_type="MACD趋势",
-                fast_window=12,
-                slow_window=26,
-                signal_period=9,
-                use_ma60_filter=False,
-                lot_size=100,
-            ),
+            StrategyDefinition(name="双均线策略", strategy_type="双均线", fast_window=5, slow_window=20),
+            StrategyDefinition(name="MACD趋势策略", strategy_type="MACD趋势", fast_window=12, slow_window=26, signal_period=9),
+            StrategyDefinition(name="RSI策略", strategy_type="RSI", rsi_period=14, rsi_oversold=30.0, rsi_overbought=70.0),
+            StrategyDefinition(name="布林带策略", strategy_type="布林带", bb_window=20, bb_num_std=2.0),
         ]
         self.watchlist: list[str] = ["000001", "600519", "000858", "601318"]
         self.latest_bar_cache: dict[str, pd.DataFrame] = {}
@@ -418,7 +411,7 @@ class MainWindow(QMainWindow):
 
         # 策略类型下拉（双均线 / MACD趋势）
         self.strategy_type_combo = QComboBox()
-        self.strategy_type_combo.addItems(["双均线", "MACD趋势"])
+        self.strategy_type_combo.addItems(["双均线", "MACD趋势", "RSI", "布林带"])
 
         # 公共参数输入框
         self.fast_window_input = QLineEdit("5")
@@ -660,6 +653,12 @@ class MainWindow(QMainWindow):
         if strategy_type == "MACD趋势":
             self.fast_window_label.setText("快线周期(EMA)")
             self.slow_window_label.setText("慢线周期(EMA)")
+        elif strategy_type == "RSI":
+            self.fast_window_label.setText("RSI周期")
+            self.slow_window_label.setText("超买阈值")
+        elif strategy_type == "布林带":
+            self.fast_window_label.setText("布林窗口")
+            self.slow_window_label.setText("标准差")
         else:
             self.fast_window_label.setText("快线周期(MA)")
             self.slow_window_label.setText("慢线周期(MA)")
@@ -855,7 +854,7 @@ class MainWindow(QMainWindow):
     def add_strategy(self) -> None:
         """添加策略：先选类型，再输入名称，按类型设置默认参数。"""
         # 第一步：选择策略类型
-        strategy_types = ["双均线", "MACD趋势"]
+        strategy_types = ["双均线", "MACD趋势", "RSI", "布林带"]
         type_choice, ok = QInputDialog.getItem(
             self, "添加策略", "选择策略类型：", strategy_types, 0, False
         )
@@ -870,23 +869,13 @@ class MainWindow(QMainWindow):
 
         # 根据类型设置合理默认参数
         if type_choice == "MACD趋势":
-            defn = StrategyDefinition(
-                name=name.strip(),
-                strategy_type="MACD趋势",
-                fast_window=12,
-                slow_window=26,
-                signal_period=9,
-                use_ma60_filter=False,
-                lot_size=100,
-            )
+            defn = StrategyDefinition(name=name.strip(), strategy_type="MACD趋势", fast_window=12, slow_window=26, signal_period=9)
+        elif type_choice == "RSI":
+            defn = StrategyDefinition(name=name.strip(), strategy_type="RSI", rsi_period=14, rsi_oversold=30.0, rsi_overbought=70.0)
+        elif type_choice == "布林带":
+            defn = StrategyDefinition(name=name.strip(), strategy_type="布林带", bb_window=20, bb_num_std=2.0)
         else:
-            defn = StrategyDefinition(
-                name=name.strip(),
-                strategy_type="双均线",
-                fast_window=5,
-                slow_window=20,
-                lot_size=100,
-            )
+            defn = StrategyDefinition(name=name.strip(), strategy_type="双均线", fast_window=5, slow_window=20)
 
         self.strategy_definitions.append(defn)
         self.refresh_strategy_list()
@@ -1284,14 +1273,25 @@ class MainWindow(QMainWindow):
                             symbol_list=self.watchlist,
                             position_ratio=0.2,
                         )
-                    else:
-                        # 默认：双均线
-                        temp_strategy = DoubleMA_Strategy(
-                            short_window=strategy.fast_window,
-                            long_window=strategy.slow_window,
+                    elif strategy.strategy_type == "RSI":
+                        from autotrader_app.strategies.rsi_strategy import RSIStrategy
+                        temp_strategy = RSIStrategy(
+                            period=strategy.rsi_period,
+                            oversold=strategy.rsi_oversold,
+                            overbought=strategy.rsi_overbought,
                             symbol_list=self.watchlist,
                             position_ratio=0.2,
                         )
+                    elif strategy.strategy_type == "布林带":
+                        from autotrader_app.strategies.bollinger_strategy import BollingerBandsStrategy
+                        temp_strategy = BollingerBandsStrategy(
+                            window=strategy.bb_window,
+                            num_std=strategy.bb_num_std,
+                            symbol_list=self.watchlist,
+                            position_ratio=0.2,
+                        )
+                    else:
+                        temp_strategy = DoubleMA_Strategy(short_window=strategy.fast_window, long_window=strategy.slow_window, symbol_list=self.watchlist, position_ratio=0.2)
 
                     # ── 构建账户上下文 ───────────────────────
                     latest_prices: dict[str, float] = {}
