@@ -85,6 +85,7 @@ class SchedulerService:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        schedule.clear()
         self._register_trading_hours()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -93,6 +94,10 @@ class SchedulerService:
 
     def stop(self) -> None:
         self._stop_event.set()
+        schedule.clear()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
         logger.info("Scheduler stopped")
 
     def _run_loop(self) -> None:

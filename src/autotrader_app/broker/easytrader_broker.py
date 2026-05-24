@@ -187,14 +187,10 @@ class EasyTraderBroker(BrokerBase):
             return False
         return True
 
-    def _place_live(
-        self,
-        order: OrderRequest,
-        order_id: str,
-    ) -> tuple[OrderResult, list[FillResult]]:
+    def _place_live(self, order: OrderRequest, order_id: str) -> tuple[OrderResult, list[FillResult]]:
         """实际通过 easytrader 下单（实盘模式）。"""
-        assert self._user is not None
-        assert self.is_live
+        if self._user is None:
+            return self._mock_result(order, OrderStatus.REJECTED, "客户端未连接")
 
         try:
             # easytrader 下单参数：股票代码、价格、数量、方向
@@ -405,21 +401,36 @@ class EasyTraderBroker(BrokerBase):
     # ────────────────────────────────────────────────────────────────
 
     def get_latest_price(self, symbol: str) -> float | None:
-        """通过 easytrader 获取股票最新价。
+        """获取股票最新价。
 
-        某些券商客户端支持，若不可用返回 None。
+        优先使用行情接口；若不可用则从持仓数据提取（仅限已持仓股票）。
         """
         if not self._check_live_ready():
             return None
         try:
             assert self._user is not None
-            raw = self._user.position  # type: ignore[attr-defined]
+            try:
+                quote = self._user.get_security_quotes(symbol)
+                if quote is not None:
+                    if isinstance(quote, list) and quote:
+                        row = quote[0]
+                        for col in ("price", "current_price"):
+                            if col in row:
+                                return float(row[col])
+                    if isinstance(quote, dict):
+                        for col in ("price", "current_price"):
+                            if col in quote:
+                                return float(quote[col])
+            except (AttributeError, Exception):
+                pass
+            raw = self._user.position
             if raw is not None:
                 df = pd.DataFrame(raw)
                 row = df[df.get("stock_code", df.get("symbol")) == symbol]
                 if not row.empty:
-                    price_col = "current_price" if "current_price" in row.columns else "price"
-                    return float(row[price_col].iloc[0]) if price_col in row.columns else None
+                    for col in ("current_price", "price", "cost_price"):
+                        if col in row.columns:
+                            return float(row[col].iloc[0])
         except Exception:
             pass
         return None

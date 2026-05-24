@@ -453,17 +453,13 @@ class RiskManager:
         latest_prices: dict[str, float],
         current_assets: float,
     ) -> list[StopSignal]:
-        """检查全局最大回撤，触发时返回所有持仓的 max_drawdown 平仓信号。"""
-        if self._peak_assets <= 0:
+        """检查全局最大回撤，熔断只触发一次（reset 可清除）。"""
+        if self._peak_assets <= 0 or self._drawdown_triggered:
             return []
 
         drawdown_pct = (self._peak_assets - current_assets) / self._peak_assets * 100
         if drawdown_pct < self.config.max_drawdown_pct:
-            self._drawdown_triggered = False   # 回撤收窄，解除熔断标记
             return []
-
-        if self._drawdown_triggered:
-            return []   # 已经触发过，不重复产生信号
 
         self._drawdown_triggered = True
         signals: list[StopSignal] = []

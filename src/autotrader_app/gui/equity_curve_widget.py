@@ -353,11 +353,11 @@ class EquityCurveWidget(QWidget):
 
     def _draw_chart(self) -> None:
         """根据缓存数据重绘多线净值图。"""
+        self._figure.clf()
+        self._ax = self._figure.add_subplot(111)
         ax = self._ax
-        ax.clear()
         ax.set_facecolor(self._BG)
 
-        # 清空所有引用（ax.clear() 后旧对象失效）
         self._lines.clear()
         self._drawn_series.clear()
         self._fill_patches.clear()

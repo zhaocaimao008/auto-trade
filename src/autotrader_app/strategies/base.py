@@ -38,6 +38,7 @@ class StrategyContext:
     total_position_ratio: float = 0.0
     positions: dict[str, int] = field(default_factory=dict)
     latest_prices: dict[str, float] = field(default_factory=dict)
+    avg_prices: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -189,14 +190,7 @@ class StrategyBase(ABC):
             avg_price = 0.0
             qty = context.positions.get(symbol, 0)
             if qty > 0 and current_price > 0:
-                # avg_price 从 latest_prices 取不到时尝试反推（模拟模式下 context 没有 avg_price 字段）
-                # 单独构造一条最小 positions 列表
-                pos_list = [{"symbol": symbol, "quantity": qty, "avg_price": context.latest_prices.get(symbol, 0.0)}]
-                # 尝试从 context 里获取真实成本（如果调用方填充了 avg_prices 字段）
-                avg_price_map: dict[str, float] = getattr(context, "avg_prices", {})
-                if symbol in avg_price_map:
-                    pos_list[0]["avg_price"] = avg_price_map[symbol]
-
+                pos_list = [{"symbol": symbol, "quantity": qty, "avg_price": context.avg_prices.get(symbol, current_price)}]
                 stop_signals = rm.scan_positions(
                     pos_list,
                     {symbol: current_price},

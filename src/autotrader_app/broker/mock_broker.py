@@ -31,28 +31,23 @@ class MockBroker(BrokerBase):
         self.account = AccountState(cash=initial_cash)
 
     def _place_impl(self, order: OrderRequest) -> tuple[OrderResult, list[FillResult]]:
-        with get_session() as session:
-            positions = PositionRepository(session)
-            orders = OrderRepository(session)
-            fills = FillRepository(session)
-            accounts = AccountRepository(session)
-
-            result, fill_records = self._fill_order(order, positions)
-            orders.add(result)
-            for fr in fill_records:
-                fills.add(fr)
-            self._refresh_market_value(positions)
-            accounts.add_snapshot(self.account.cash, self.account.market_value)
-
-            logger.info(
-                "Mock order filled: {} {} x{} @ {} ({} fill records)",
-                result.side.value,
-                result.symbol,
-                result.quantity,
-                result.price,
-                len(fill_records),
-            )
-            return result, fill_records
+        try:
+            with get_session() as session:
+                positions = PositionRepository(session)
+                orders = OrderRepository(session)
+                fills = FillRepository(session)
+                accounts = AccountRepository(session)
+                result, fill_records = self._fill_order(order, positions)
+                orders.add(result)
+                for fr in fill_records:
+                    fills.add(fr)
+                self._refresh_market_value(positions)
+                accounts.add_snapshot(self.account.cash, self.account.market_value)
+                logger.info("Mock order filled: {} {} x{} @ {} ({} fill)", result.side.value, result.symbol, result.quantity, result.price, len(fill_records))
+                return result, fill_records
+        except Exception as exc:
+            logger.error("Mock order failed: {}: {}", order.symbol, exc)
+            return self._mock_result(order, OrderStatus.REJECTED, f"系统异常：{exc}")
 
     def get_positions(self) -> pd.DataFrame:
         with get_session() as session:
@@ -63,23 +58,30 @@ class MockBroker(BrokerBase):
             )
 
     def cancel_order(self, order_id: str) -> bool:
-        """取消委托（Mock 下直接返回 False 表示已成交不可撤）。"""
-        with get_session() as session:
-            repo = OrderRepository(session)
-            order = repo.get_by_order_id(order_id)
-            if order is None or order.status not in (OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
-                return False
-            order.status = OrderStatus.CANCELLED
-            repo.add_or_update(order)
-            return True
+        try:
+            with get_session() as session:
+                repo = OrderRepository(session)
+                order = repo.get_by_order_id(order_id)
+                if order is None or order.status not in (OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
+                    return False
+                order.status = OrderStatus.CANCELLED
+                repo.add_or_update(order)
+                return True
+        except Exception as exc:
+            logger.error("cancel_order failed: {}: {}", order_id, exc)
+            return False
 
     def get_positions(self) -> pd.DataFrame:
-        with get_session() as session:
-            repo = PositionRepository(session)
-            rows = repo.list_all()
-            return pd.DataFrame(
-                [{"symbol": row.symbol, "quantity": row.quantity, "avg_price": row.avg_price} for row in rows]
-            )
+        try:
+            with get_session() as session:
+                rows = PositionRepository(session).list_all()
+                if rows:
+                    return pd.DataFrame(
+                        [{"symbol": r.symbol, "quantity": r.quantity, "avg_price": r.avg_price} for r in rows]
+                    )
+        except Exception as exc:
+            logger.error("get_positions failed: {}", exc)
+        return pd.DataFrame(columns=["symbol", "quantity", "avg_price"])
 
     def get_fills(self) -> pd.DataFrame:
         """获取所有成交记录，按时间倒序。"""

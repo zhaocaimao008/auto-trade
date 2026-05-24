@@ -221,7 +221,8 @@ class MplKLineCanvas(FigureCanvasQTAgg):
         self.axes.set_facecolor("#111827")
 
     def plot_bars(self, bars: pd.DataFrame, title: str) -> None:
-        self.axes.clear()
+        self.figure.clf()
+        self.axes = self.figure.add_subplot(111)
         self.axes.set_facecolor("#111827")
         self.axes.tick_params(colors="#e5e7eb")
         self.axes.spines["bottom"].set_color("#6b7280")
@@ -695,6 +696,7 @@ class MainWindow(QMainWindow):
 
     def _setup_timers(self) -> None:
         # 5s 快速心跳：时钟、账户
+        self._heartbeat_tick = 0
         self.heartbeat_timer = QTimer(self)
         self.heartbeat_timer.setInterval(5000)
         self.heartbeat_timer.timeout.connect(self._on_heartbeat)
@@ -714,14 +716,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self._heartbeat_counter = getattr(self, "_heartbeat_counter", 0) + 1
+        self._heartbeat_tick = (self._heartbeat_tick + 1) % 60
 
-        # 权益曲线每 3 次心跳（≈15 s）刷新一次
-        if self._heartbeat_counter % 3 == 0:
+        # 权益曲线每 3 次心跳（≈15 s）
+        if self._heartbeat_tick % 3 == 0:
             self.refresh_equity_curve()
 
-        # EasyTrader 心跳检查（每 60s = 12 次心跳）
-        if self._is_live_trading and self._heartbeat_counter % 12 == 0:
+        # EasyTrader 心跳检查（每 60s）
+        if self._is_live_trading and self._heartbeat_tick % 12 == 0:
             self._check_easytrader_connection()
 
     def _refresh_position_cache(self, force: bool = False) -> None:
@@ -797,7 +799,7 @@ class MainWindow(QMainWindow):
         if not is_trading_time(now_bjt):
             self.market_status_label.setText("状态：⏸ 非交易时间")
 
-        self._market_refresh_tick += 1
+        self._market_refresh_tick = (self._market_refresh_tick + 1) % 100
 
         in_session = is_trading_time(now_bjt)
 
