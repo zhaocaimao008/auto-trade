@@ -230,26 +230,7 @@ def save_products_api():
 
 @app.route("/api/auth/buy", methods=["POST"])
 def buy():
-    data = request.get_json(force=True, silent=True)
-    if not data: return jsonify({"success": False}), 400
-    pid = data.get("product_id")
-    products = load_products()
-    product = next((p for p in products if p["id"] == pid), None)
-    if not product: return jsonify({"success": False, "message": "商品不存在"}), 200
-
-    key = new_key()
-    seconds = parse_duration(product["duration"])
-    db = load()
-    db[key] = {
-        "created_at": time.time(),
-        "expire_at": time.time() + seconds if seconds > 0 else 0,
-        "duration_text": product["duration"],
-        "bound_machine": "", "activated_at": 0,
-        "remark": f"在线购买-{product['name']}",
-    }
-    save(db)
-    expire_str = "永久" if seconds == 0 else time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + seconds))
-    return jsonify({"success": True, "key": key, "expire": expire_str})
+    return jsonify({"success": False, "message": "请扫码付款后联系客服获取授权码"}), 200
 
 
 # ────────────────────────────────────────────────────────────
@@ -267,38 +248,32 @@ body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif;display:f
 .container{max-width:460px;width:100%;text-align:center}
 h1{color:#f8fafc;margin-bottom:4px}
 .sub{color:#94a3b8;font-size:14px;margin-bottom:20px}
-.product{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;margin-bottom:8px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin:16px 0}
+.product{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;margin-bottom:8px;transition:all 0.2s}
 .product:hover{border-color:#3b82f6}
-.product.selected{border-color:#22c55e;background:#14532d}
+.product.selected{border-color:#f59e0b;background:#1e3a5f}
 .name{font-size:15px}
 .price{font-size:18px;font-weight:bold;color:#22c55e}
-.qr-box{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin:12px 0;display:none}
-.qr-box img{max-width:200px}
-.qr-box .tip{color:#94a3b8;font-size:12px;margin-top:6px}
-.btn{background:#22c55e;border:none;border-radius:6px;color:white;font-size:16px;font-weight:bold;padding:12px;width:100%;cursor:pointer;display:none;margin-top:8px}
-.btn:hover{background:#16a34a}
-.btn:disabled{opacity:0.5}
-.result{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin-top:12px;display:none}
-.result .key{color:#f59e0b;font-size:24px;font-weight:bold;letter-spacing:2px;margin:8px 0}
-.loading{color:#94a3b8;margin-top:8px;display:none}
+.qr-box{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin:12px 0;display:none;text-align:center}
+.qr-box img{max-width:200px;border-radius:4px}
+.contact{color:#f59e0b;font-size:14px;margin-top:8px}
+.step{color:#94a3b8;font-size:14px;margin-bottom:6px}
 </style></head>
 <body>
 <div class="container">
 <h1>🔑 A股自动交易系统</h1>
-<p class="sub">选择时长 → 扫码付款 → 自动获取授权码</p>
+<p class="sub">选择商品 → 扫码付款 → 联系客服获取授权码</p>
 <div id="products"></div>
-<div class="qr-box" id="qrBox"><img id="qrImg"><p class="tip">扫码付款后点击下方按钮</p></div>
-<button class="btn" id="btnBuy" onclick="buy()">我已付款，获取授权码</button>
-<div class="loading" id="loading">⏳ 正在生成...</div>
-<div class="result" id="result">
-<p style="color:#22c55e;font-size:16px">✅ 购买成功！</p>
-<p style="color:#94a3b8;font-size:13px">授权码：</p>
-<p class="key" id="keyDisplay"></p>
-<p class="tip" style="font-size:12px" id="expDisplay"></p>
+<div class="qr-box" id="qrBox"><img id="qrImg"><p class="sub" style="margin-top:8px">扫码付款后联系客服</p></div>
+<div class="card" id="contactInfo" style="display:none;text-align:center">
+<p style="color:#22c55e;font-size:16px;margin-bottom:8px">✅ 已选择商品</p>
+<p class="step">1. 使用微信/支付宝扫码付款</p>
+<p class="step">2. 添加客服微信发送付款截图</p>
+<p class="step">3. 客服发送授权码给你</p>
+<p class="contact">客服微信：你的微信号</p>
 </div>
 </div>
 <script>
-let pid = null;
 fetch('/api/auth/products').then(r=>r.json()).then(d=>{
     document.getElementById('products').innerHTML = d.products.map(p =>
         '<div class=product onclick="sel('+p.id+',this)"><span class=name>'+p.name+'</span><span class=price>'+p.price+' 元</span></div>'
@@ -307,25 +282,9 @@ fetch('/api/auth/products').then(r=>r.json()).then(d=>{
 });
 function sel(id,el){
     document.querySelectorAll('.product').forEach(p=>p.classList.remove('selected'));
-    el.classList.add('selected'); pid=id;
+    el.classList.add('selected');
     document.getElementById('qrBox').style.display='block';
-    document.getElementById('btnBuy').style.display='block';
-    document.getElementById('result').style.display='none';
-}
-async function buy(){
-    if(!pid) return;
-    document.getElementById('btnBuy').disabled=true;
-    document.getElementById('loading').style.display='block';
-    const r=await fetch('/api/auth/buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_id:pid})});
-    const d=await r.json();
-    document.getElementById('loading').style.display='none';
-    if(d.success){
-        document.getElementById('keyDisplay').textContent=d.key;
-        document.getElementById('expDisplay').textContent='有效期至: '+d.expire;
-        document.getElementById('result').style.display='block';
-        document.getElementById('qrBox').style.display='none';
-        document.getElementById('btnBuy').style.display='none';
-    }else alert(d.message);
+    document.getElementById('contactInfo').style.display='block';
 }
 </script>
 </body></html>"""
