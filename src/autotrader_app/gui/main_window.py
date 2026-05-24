@@ -930,6 +930,13 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.pause_button.setEnabled(True)
         self.stop_button.setEnabled(True)
+        try:
+            if not self.heartbeat_timer.isActive():
+                self.heartbeat_timer.start()
+            if not self.engine_timer.isActive():
+                self.engine_timer.start()
+        except Exception:
+            pass
         self.log("━━━━━ 交易引擎已启动 ━━━━━")
 
         # 立即执行一次行情 + 策略
@@ -953,6 +960,7 @@ class MainWindow(QMainWindow):
             self.log("交易引擎恢复运行。")
 
     def stop_trading(self) -> None:
+        """停止交易引擎（停止所有定时器）。"""
         self.is_running = False
         self.is_paused = False
         self.market_status_label.setText("状态：⏹ 已停止")
@@ -960,6 +968,11 @@ class MainWindow(QMainWindow):
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.pause_button.setText("⏸ 暂停")
+        try:
+            self.heartbeat_timer.stop()
+            self.engine_timer.stop()
+        except Exception:
+            pass
         self.log("━━━━━ 交易引擎已停止 ━━━━━")
 
     # ── 定时调度回调 ─────────────────────────────────────
@@ -985,21 +998,45 @@ class MainWindow(QMainWindow):
     # ── 紧急停止与安全 ───────────────────────────────────
 
     def _emergency_stop(self) -> None:
-        """紧急停止引擎（快捷键 Ctrl+Shift+Escape）。"""
+        """紧急停止引擎（快捷键 Ctrl+Shift+Escape）。
+
+        效果：
+        1. 停止所有定时器（heartbeat + engine）
+        2. 停止调度器（SchedulerService）
+        3. 实盘模式可选清仓
+        """
         resp = QMessageBox.critical(
             self,
             "🛑 紧急停止",
-            "是否立即停止交易引擎？\n\n引擎停止后不会自动执行任何策略。\n现有的委托不会被撤销。",
+            "是否立即停止交易引擎并关闭所有定时器？\n\n"
+            "引擎停止后不会自动执行任何策略。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
+
         self.stop_trading()
+
+        try:
+            self.scheduler.stop()
+        except Exception:
+            pass
+
         if self._is_live_trading:
-            from autotrader_app.logging_config import live_logger
-            live_logger().warning("[紧急停止] 用户触发紧急停止，引擎已关闭")
-        self.log("🛑 紧急停止已执行")
+            sell_resp = QMessageBox.question(
+                self,
+                "⚠️ 实盘清仓",
+                "是否同时清仓所有持仓？\n\n这将会发送真实卖出委托！",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if sell_resp == QMessageBox.StandardButton.Yes:
+                self._panic_sell_all()
+
+        from autotrader_app.logging_config import live_logger
+        live_logger().warning("[紧急停止] 用户触发紧急停止，引擎和调度器已关闭")
+        self.log("🛑 紧急停止已执行（引擎+调度器已停止）")
 
     def _panic_sell_all(self) -> None:
         """清仓所有持仓。"""
@@ -1213,9 +1250,15 @@ class MainWindow(QMainWindow):
                     f"🤖 [{strategy_name}] 自动买入 {symbol} "
                     f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
                 )
+                if self._is_live_trading:
+                    from autotrader_app.logging_config import live_logger
+                    live_logger().info(
+                        "[自动买入] [{}] {} x{} @ {:.2f} → {}",
+                        strategy_name, symbol, decision.suggested_quantity, decision.price, result.status.value,
+                    )
                 self.refresh_account_views()
                 self._refresh_position_cache(force=True)
-                self.refresh_equity_curve()          # 成交后立即刷新权益曲线
+                self.refresh_equity_curve()
             except Exception as exc:
                 self.log(f"🤖 自动买入 {symbol} 失败：{exc}")
 
@@ -1229,6 +1272,12 @@ class MainWindow(QMainWindow):
                     f"🤖 [{strategy_name}] 自动卖出 {symbol} "
                     f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
                 )
+                if self._is_live_trading:
+                    from autotrader_app.logging_config import live_logger
+                    live_logger().info(
+                        "[自动卖出] [{}] {} x{} @ {:.2f} → {}",
+                        strategy_name, symbol, decision.suggested_quantity, decision.price, result.status.value,
+                    )
                 self.refresh_account_views()
                 self._refresh_position_cache(force=True)
                 self.refresh_equity_curve()          # 成交后立即刷新权益曲线
@@ -1309,6 +1358,18 @@ class MainWindow(QMainWindow):
         )
         return resp == QMessageBox.StandardButton.Yes
 
+    def _check_live_order_limit(self, price: float, quantity: int) -> tuple[bool, str]:
+        """实盘下单金额限制检查。
+
+        单笔最大金额硬限制 50,000 元，防止价格/数量错误导致巨大损失。
+        """
+        if not self._is_live_trading:
+            return True, ""
+        total = price * quantity
+        if total > 50_000:
+            return False, f"单笔委托金额 {total:.0f} 元超过上限 50,000 元"
+        return True, ""
+
     def submit_manual_order(self, side: str) -> None:
         symbol = self.get_selected_symbol()
         if symbol is None:
@@ -1324,6 +1385,13 @@ class MainWindow(QMainWindow):
         lot_size = strategy.lot_size if strategy else 100
         desc = f"{'买入' if side.upper() == 'BUY' else '卖出'} {symbol} x{lot_size} @ {last_price:.2f}"
 
+        # 实盘金额限制检查
+        ok, limit_msg = self._check_live_order_limit(last_price, lot_size)
+        if not ok:
+            QMessageBox.warning(self, "金额超限", limit_msg)
+            self.log(f"❌ {limit_msg}")
+            return
+
         if not self._confirm_live_order(desc):
             self.log(f"用户取消：{desc}")
             return
@@ -1331,6 +1399,12 @@ class MainWindow(QMainWindow):
         try:
             result = self.trading_service.submit_manual_order(symbol, side, lot_size, last_price)
             self.log(f"手动 {side} {symbol} x{lot_size} @ {last_price:.2f} → {result.status.value} {result.reason}")
+            if self._is_live_trading:
+                from autotrader_app.logging_config import live_logger
+                live_logger().info(
+                    "[手动下单] {} {} x{} @ {:.2f} → {} {}",
+                    side, symbol, lot_size, last_price, result.status.value, result.reason,
+                )
             self.refresh_account_views()
             self._refresh_position_cache(force=True)
             self.refresh_equity_curve()              # 手动下单后立即刷新权益曲线
