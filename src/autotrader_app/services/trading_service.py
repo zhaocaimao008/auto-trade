@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 from loguru import logger
 
+from autotrader_app.broker import create_broker
 from autotrader_app.broker.broker_base import BrokerBase
-from autotrader_app.broker.mock_broker import MockBroker
 from autotrader_app.data.providers import DataProviderFactory, DataRequest, MarketDataProvider
 from autotrader_app.models import OrderRequest, OrderSide
 from autotrader_app.strategies.base import StrategyBase, StrategyContext, StrategySignal
@@ -23,7 +23,7 @@ class TradingService:
 
     def __init__(self, provider: MarketDataProvider | None = None, broker: BrokerBase | None = None) -> None:
         self.provider = provider or DataProviderFactory.create()
-        self.broker = broker or MockBroker()
+        self.broker = broker or create_broker()  # 根据 .env BROKER_TYPE 自动选择
         # 默认双均线策略（向后兼容旧有调用）
         self.strategy = DoubleMA_Strategy(symbol_list=[], position_ratio=0.2)
         # 多策略注册表：name -> 策略实例

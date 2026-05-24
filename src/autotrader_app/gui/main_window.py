@@ -46,7 +46,6 @@ from PyQt6.QtWidgets import (
 
 from autotrader_app.backtest.engine import BacktestEngine
 from autotrader_app.broker import create_broker
-from autotrader_app.broker.mock_broker import MockBroker
 from autotrader_app.config import BASE_DIR, check_config, get_settings
 from autotrader_app.data.providers import DataProviderFactory
 from autotrader_app.database import get_session
@@ -226,15 +225,15 @@ class MainWindow(QMainWindow):
         self.provider = DataProviderFactory.create(get_settings().default_data_source)
         self._initial_cash: float = 100_000.0          # 初始资金（绘制净值曲线基准）
 
-        # Broker 创建：根据配置选择 Mock 或 EasyTrader
+        # Broker 创建：根据配置自动选择 Mock 或 EasyTrader
         settings = get_settings()
         self._is_live_trading = settings.is_live_trading
-        if self._is_live_trading:
-            self.broker = create_broker(broker_type="easytrader", is_live=True)
-            self.broker_type_label = "实盘"
-        else:
-            self.broker = MockBroker(initial_cash=self._initial_cash)
-            self.broker_type_label = "模拟"
+        self.broker = create_broker(
+            broker_type="easytrader" if self._is_live_trading else "mock",
+            is_live=self._is_live_trading,
+            initial_cash=self._initial_cash,
+        )
+        self.broker_type_label = "实盘" if self._is_live_trading else "模拟"
         self.trading_service = TradingService(provider=self.provider, broker=self.broker)
         self.backtest_engine = BacktestEngine()
 
@@ -1046,6 +1045,16 @@ class MainWindow(QMainWindow):
         if not hasattr(decision, "signal"):
             return
 
+        desc = (
+            f"[{strategy_name}] {'买入' if decision.signal == StrategySignal.BUY else '卖出'} "
+            f"{symbol} x{decision.suggested_quantity} @ {decision.price:.2f}"
+        )
+
+        # 实盘模式下自动执行前弹窗确认
+        if not self._confirm_live_order(desc):
+            self.log(f"用户取消自动执行：{desc}")
+            return
+
         if decision.signal == StrategySignal.BUY and decision.suggested_quantity > 0:
             try:
                 result = self.trading_service.submit_manual_order(
@@ -1127,6 +1136,28 @@ class MainWindow(QMainWindow):
 
     # ── 手动下单 ───────────────────────────────────────────
 
+    def _confirm_live_order(self, action_desc: str) -> bool:
+        """实盘模式二次确认弹窗。
+
+        Args:
+            action_desc: 操作描述（如"买入 000001 x100 @ 12.50"）。
+
+        Returns:
+            True 用户确认，False 取消。
+        """
+        if not self._is_live_trading:
+            return True
+
+        resp = QMessageBox.warning(
+            self,
+            "⚠️ 实盘交易确认",
+            f"当前为实盘模式，即将执行：\n\n{action_desc}\n\n"
+            "此操作将发送真实交易委托到券商！\n是否确认？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return resp == QMessageBox.StandardButton.Yes
+
     def submit_manual_order(self, side: str) -> None:
         symbol = self.get_selected_symbol()
         if symbol is None:
@@ -1140,6 +1171,11 @@ class MainWindow(QMainWindow):
         last_price = float(bars.iloc[-1]["close"])
         strategy = self.current_strategy()
         lot_size = strategy.lot_size if strategy else 100
+        desc = f"{'买入' if side.upper() == 'BUY' else '卖出'} {symbol} x{lot_size} @ {last_price:.2f}"
+
+        if not self._confirm_live_order(desc):
+            self.log(f"用户取消：{desc}")
+            return
 
         try:
             result = self.trading_service.submit_manual_order(symbol, side, lot_size, last_price)
@@ -1299,12 +1335,12 @@ class MainWindow(QMainWindow):
             new_is_live = live_mode == "easytrader"
             if new_is_live != self._is_live_trading or broker_type != settings.broker_type:
                 self._is_live_trading = new_is_live
-                if self._is_live_trading:
-                    self.broker = create_broker(broker_type="easytrader", is_live=True)
-                    self.broker_type_label = "实盘"
-                else:
-                    self.broker = MockBroker(initial_cash=self._initial_cash)
-                    self.broker_type_label = "模拟"
+                self.broker = create_broker(
+                    broker_type="easytrader" if self._is_live_trading else "mock",
+                    is_live=self._is_live_trading,
+                    initial_cash=self._initial_cash,
+                )
+                self.broker_type_label = "实盘" if self._is_live_trading else "模拟"
                 self.trading_service.broker = self.broker
                 self.broker_status_label.setText(f"Broker：{self.broker_type_label}")
                 self.log(f"Broker 已切换为: {self.broker_type_label}")
