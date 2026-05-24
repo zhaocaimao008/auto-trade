@@ -27,6 +27,7 @@ class MockBroker(BrokerBase):
     """模拟交易柜台，继承 BrokerBase 统一接口。"""
 
     def __init__(self, initial_cash: float = 100_000.0) -> None:
+        self._initial_cash: float = initial_cash        # 保存原始初始资金（NAV 基准）
         self.account = AccountState(cash=initial_cash)
 
     def _place_impl(self, order: OrderRequest) -> tuple[OrderResult, list[FillResult]]:
@@ -115,6 +116,7 @@ class MockBroker(BrokerBase):
                     order_type=order.order_type,
                     status=OrderStatus.REJECTED,
                     reason="资金不足",
+                    strategy_name=order.strategy_name,
                 ), []
 
             self.account.cash -= cost
@@ -136,6 +138,7 @@ class MockBroker(BrokerBase):
                     order_type=order.order_type,
                     status=OrderStatus.REJECTED,
                     reason="持仓不足",
+                    strategy_name=order.strategy_name,
                 ), []
 
             income = order.quantity * order.price
@@ -166,6 +169,7 @@ class MockBroker(BrokerBase):
             price=order.price,
             order_type=order.order_type,
             status=OrderStatus.FILLED,
+            strategy_name=order.strategy_name,
         ), fills
 
     def get_equity_history(self, limit: int = 2000) -> pd.DataFrame:
@@ -208,3 +212,113 @@ class MockBroker(BrokerBase):
         for position in repo.list_all():
             total += position.quantity * position.avg_price
         self.account.market_value = total
+
+    # ── 多策略净值序列 ──────────────────────────────────────
+
+    def get_strategy_equity_series(
+        self,
+        initial_cash: float | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """按策略名分别计算权益净值序列，用于多策略对比曲线。
+
+        对每个策略，用 FIFO 法把该策略的所有成交配对，计算累计已实现盈亏，
+        生成 NAV 时间序列（NAV = 1.0 + cumulative_pnl / initial_cash）。
+
+        Returns:
+            dict: 策略名 -> DataFrame(created_at, nav)
+                  仅含有实际成交的策略（manual 成交被过滤掉）。
+                  若序列点数 < 2，则不包含在结果中。
+        """
+        ic = initial_cash if initial_cash is not None else self._initial_cash
+
+        with get_session() as session:
+            fills_with_strategy = FillRepository(session).list_all_with_strategy()
+
+        if not fills_with_strategy:
+            return {}
+
+        # 按策略名分组（跳过 manual）
+        strategy_fills: dict[str, list[dict]] = {}
+        for fill in fills_with_strategy:
+            name = fill.get("strategy_name") or "manual"
+            if name == "manual":
+                continue
+            strategy_fills.setdefault(name, []).append(fill)
+
+        result: dict[str, pd.DataFrame] = {}
+        for name, fills in strategy_fills.items():
+            df = self._compute_nav_series(fills, ic)
+            if not df.empty and len(df) >= 2:
+                result[name] = df
+
+        return result
+
+    def _compute_nav_series(
+        self,
+        fills: list[dict],
+        initial_cash: float,
+    ) -> pd.DataFrame:
+        """FIFO 法计算单策略的 NAV 时间序列。
+
+        · BUY 时压入队列；SELL 时 FIFO 出仓并结算盈亏；
+        · NAV 仅在 SELL 成交时更新（已实现盈亏基础）；
+        · 序列首点固定为 (first_fill_time, 1.0)；
+        · 序列末点延伸至 datetime.now()，保持曲线连贯。
+
+        Returns:
+            DataFrame(created_at, nav)
+        """
+        if not fills:
+            return pd.DataFrame(columns=["created_at", "nav"])
+
+        fills_sorted = sorted(fills, key=lambda x: x["filled_at"])
+        first_ts = fills_sorted[0]["filled_at"]
+
+        open_lots: dict[str, list[tuple[int, float]]] = {}
+        cumulative_pnl = 0.0
+        records: list[dict] = [{"created_at": first_ts, "nav": 1.0}]
+
+        for fill in fills_sorted:
+            symbol = str(fill["symbol"])
+            qty    = int(fill["quantity"])
+            price  = float(fill["price"])
+            side   = str(fill["side"])
+            ts     = fill["filled_at"]
+
+            if side == "BUY":
+                open_lots.setdefault(symbol, []).append((qty, price))
+                # 买入不改变已实现 NAV，仅压队列
+            elif side == "SELL":
+                queue = open_lots.get(symbol, [])
+                remaining = qty
+                cost_sum  = 0.0
+                cost_qty  = 0
+                while remaining > 0 and queue:
+                    lot_qty, lot_price = queue[0]
+                    take = min(remaining, lot_qty)
+                    cost_sum += take * lot_price
+                    cost_qty += take
+                    remaining -= take
+                    if take == lot_qty:
+                        queue.pop(0)
+                    else:
+                        queue[0] = (lot_qty - take, lot_price)
+                if cost_qty > 0:
+                    avg_cost = cost_sum / cost_qty
+                    pnl = (price - avg_cost) * cost_qty
+                    cumulative_pnl += pnl
+                    records.append({
+                        "created_at": ts,
+                        "nav": 1.0 + cumulative_pnl / initial_cash,
+                    })
+
+        # 末尾追加实时点，保证曲线延伸至当前时刻
+        records.append({
+            "created_at": datetime.now(),
+            "nav": 1.0 + cumulative_pnl / initial_cash,
+        })
+
+        df = pd.DataFrame(records)
+        # 去重：同一时刻只保留最后一条
+        df = df.drop_duplicates(subset=["created_at"], keep="last").reset_index(drop=True)
+        return df

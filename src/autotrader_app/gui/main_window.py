@@ -934,7 +934,7 @@ class MainWindow(QMainWindow):
 
                     # ── 引擎运行时自动执行 ───────────────────
                     if self.is_running and not self.is_paused:
-                        self._auto_execute(symbol, decision)
+                        self._auto_execute(symbol, decision, strategy_name=strategy.name)
 
                 except Exception as exc:
                     self.log(f"[{strategy.name}] {symbol} 评估失败：{exc}")
@@ -943,8 +943,19 @@ class MainWindow(QMainWindow):
         self.signal_cache.update(new_signals)
         self.refresh_signal_table()
 
-    def _auto_execute(self, symbol: str, decision) -> None:
-        """引擎运行时自动执行策略信号。"""
+    def _auto_execute(
+        self,
+        symbol: str,
+        decision,
+        strategy_name: str = "manual",
+    ) -> None:
+        """引擎运行时自动执行策略信号。
+
+        Args:
+            symbol:        股票代码。
+            decision:      策略决策对象（含 signal / suggested_quantity / price）。
+            strategy_name: 触发该信号的策略名称，写入成交记录，用于多策略净值对比。
+        """
         from autotrader_app.strategies.base import StrategySignal
 
         if not hasattr(decision, "signal"):
@@ -953,9 +964,13 @@ class MainWindow(QMainWindow):
         if decision.signal == StrategySignal.BUY and decision.suggested_quantity > 0:
             try:
                 result = self.trading_service.submit_manual_order(
-                    symbol, "BUY", decision.suggested_quantity, decision.price
+                    symbol, "BUY", decision.suggested_quantity, decision.price,
+                    strategy_name=strategy_name,
                 )
-                self.log(f"🤖 自动买入 {symbol} x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}")
+                self.log(
+                    f"🤖 [{strategy_name}] 自动买入 {symbol} "
+                    f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
+                )
                 self.refresh_account_views()
                 self._refresh_position_cache(force=True)
                 self.refresh_equity_curve()          # 成交后立即刷新权益曲线
@@ -965,9 +980,13 @@ class MainWindow(QMainWindow):
         elif decision.signal == StrategySignal.SELL and decision.suggested_quantity > 0:
             try:
                 result = self.trading_service.submit_manual_order(
-                    symbol, "SELL", decision.suggested_quantity, decision.price
+                    symbol, "SELL", decision.suggested_quantity, decision.price,
+                    strategy_name=strategy_name,
                 )
-                self.log(f"🤖 自动卖出 {symbol} x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}")
+                self.log(
+                    f"🤖 [{strategy_name}] 自动卖出 {symbol} "
+                    f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
+                )
                 self.refresh_account_views()
                 self._refresh_position_cache(force=True)
                 self.refresh_equity_curve()          # 成交后立即刷新权益曲线
@@ -1102,14 +1121,19 @@ class MainWindow(QMainWindow):
         · 每次成交后立即强制刷新（_auto_execute / submit_manual_order）
         """
         try:
-            equity_df     = self.broker.get_equity_history()
-            fills_df      = self.broker.get_fills()
+            equity_df      = self.broker.get_equity_history()
+            fills_df       = self.broker.get_fills()
             current_assets = self.broker.account.total_assets
+            # 多策略净值序列（无成交时返回 {}，widget 仅显示总权益）
+            strategy_series = self.broker.get_strategy_equity_series(
+                initial_cash=self._initial_cash
+            )
             self.equity_widget.update_equity_data(
                 equity_df,
                 initial_cash=self._initial_cash,
                 fills_df=fills_df,
                 current_assets=current_assets,
+                strategy_series=strategy_series,
             )
         except Exception as exc:
             self.log(f"权益曲线刷新失败：{exc}")

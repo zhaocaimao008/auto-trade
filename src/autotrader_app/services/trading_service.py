@@ -132,13 +132,20 @@ class TradingService:
         latest = bars.iloc[-1].to_dict() if not bars.empty else {}
         return {"signal": signal.signal.value, "reason": signal.reason, "decision": signal, "latest_bar": latest, "bar_count": len(bars)}
 
-    def submit_manual_order(self, symbol: str, side: str, quantity: int, price: float):
+    def submit_manual_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        strategy_name: str = "manual",
+    ):
         order = OrderRequest(
             symbol=symbol,
             side=OrderSide(side.upper()),
             quantity=quantity,
             price=price,
-            strategy_name="manual",
+            strategy_name=strategy_name,
         )
         return self.broker.submit_order(order)
 

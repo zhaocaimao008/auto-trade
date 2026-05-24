@@ -106,6 +106,35 @@ class FillRepository:
         stmt = select(FillRecord).order_by(FillRecord.filled_at.desc()).limit(limit)
         return list(self.session.scalars(stmt))
 
+    def list_all_with_strategy(self) -> list[dict]:
+        """返回所有成交记录并附带策略名（LEFT JOIN orders 表），按时间升序。
+
+        在 session 内转为 dict 列表，避免 DetachedInstanceError。
+
+        Returns:
+            list of dict 含字段：
+            fill_id, order_id, symbol, side, quantity, price, filled_at, strategy_name
+        """
+        stmt = (
+            select(FillRecord, OrderRecord.strategy_name)
+            .join(OrderRecord, FillRecord.order_id == OrderRecord.order_id, isouter=True)
+            .order_by(FillRecord.filled_at.asc())
+        )
+        rows = list(self.session.execute(stmt))
+        return [
+            {
+                "fill_id":       row[0].fill_id,
+                "order_id":      row[0].order_id,
+                "symbol":        row[0].symbol,
+                "side":          row[0].side,
+                "quantity":      row[0].quantity,
+                "price":         row[0].price,
+                "filled_at":     row[0].filled_at,
+                "strategy_name": row[1] or "manual",
+            }
+            for row in rows
+        ]
+
 
 class AccountRepository:
     """账户快照持久化。"""

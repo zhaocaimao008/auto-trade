@@ -60,6 +60,7 @@ class OrderResult:
     status: OrderStatus
     created_at: datetime = field(default_factory=datetime.now)
     reason: str = ""
+    strategy_name: str = "manual"
 
 
 @dataclass(slots=True)
