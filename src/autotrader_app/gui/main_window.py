@@ -6,10 +6,10 @@ from pathlib import Path
 from time import time
 
 import pandas as pd
-import matplotlib.dates as mdates
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from autotrader_app.gui.equity_curve_widget import EquityCurveWidget
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QAction, QColor, QBrush
 from PyQt6.QtWidgets import (
@@ -146,129 +146,6 @@ class MplKLineCanvas(FigureCanvasQTAgg):
         self.axes.plot(display.index, display["ma20"], color="#60a5fa", linewidth=1.1, label="MA20")
         self.axes.legend(facecolor="#111827", edgecolor="#374151", labelcolor="#e5e7eb")
         self.axes.grid(color="#374151", linestyle="--", alpha=0.35)
-        self.draw()
-
-
-class EquityCanvas(FigureCanvasQTAgg):
-    """权益净值曲线画布。
-
-    黑色主题，与 K 线图保持视觉一致。
-    · 净值 = total_assets / initial_cash（归一化为 1.0 起点）
-    · 绿色上涨区域 / 红色下跌区域
-    · 灰色基准线（净值=1.0）
-    · 自动判断涨跌颜色
-    """
-
-    _BG = "#111827"
-    _GRID = "#374151"
-    _TEXT = "#e5e7eb"
-    _GREEN = "#22c55e"
-    _RED = "#ef4444"
-    _BASELINE = "#6b7280"
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        self.figure = Figure(figsize=(6, 3.2), tight_layout=True)
-        super().__init__(self.figure)
-        self.setParent(parent)
-        self.figure.patch.set_facecolor(self._BG)
-        self._ax = self.figure.add_subplot(111)
-        self._ax.set_facecolor(self._BG)
-        self._draw_placeholder()
-
-    # ── 公开方法 ──────────────────────────────────────────
-
-    def plot_equity(self, df: "pd.DataFrame", initial_cash: float) -> None:  # noqa: F821
-        """绘制权益曲线。
-
-        Args:
-            df:           含 created_at / total_assets 列的 DataFrame。
-            initial_cash: 初始资金（作为归一化基准）。
-        """
-        ax = self._ax
-        ax.clear()
-        ax.set_facecolor(self._BG)
-
-        if df.empty or initial_cash <= 0:
-            self._draw_placeholder()
-            return
-
-        times = pd.to_datetime(df["created_at"])
-        equity = df["total_assets"].astype(float)
-        nav = equity / initial_cash          # 净值序列，起始 ≈ 1.0
-
-        final_color = self._GREEN if float(equity.iloc[-1]) >= initial_cash else self._RED
-
-        # ── 主曲线 ──────────────────────────────────────
-        ax.plot(times, nav, color=final_color, linewidth=1.6, zorder=4, label="净值")
-
-        # ── 面积填充（涨绿跌红）──────────────────────────
-        ax.fill_between(times, 1.0, nav,
-                        where=(nav >= 1.0),
-                        color=self._GREEN, alpha=0.12, zorder=2)
-        ax.fill_between(times, 1.0, nav,
-                        where=(nav < 1.0),
-                        color=self._RED, alpha=0.15, zorder=2)
-
-        # ── 基准线（净值=1.0）───────────────────────────
-        ax.axhline(1.0, color=self._BASELINE, linewidth=0.9,
-                   linestyle="--", alpha=0.7, label="初始净值")
-
-        # ── 当前净值标注 ─────────────────────────────────
-        last_nav = float(nav.iloc[-1])
-        ax.annotate(
-            f"  {last_nav:.4f}",
-            xy=(times.iloc[-1], last_nav),
-            color=final_color,
-            fontsize=9,
-            va="center",
-        )
-
-        # ── 样式 ─────────────────────────────────────────
-        ax.set_ylabel("净值", color=self._TEXT, fontsize=9)
-        ax.tick_params(colors=self._TEXT, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color(self._GRID)
-
-        # X 轴日期格式：根据时间跨度自动切换
-        span_days = (times.iloc[-1] - times.iloc[0]).total_seconds() / 86400
-        if span_days < 1:
-            fmt = mdates.DateFormatter("%H:%M")
-        elif span_days < 30:
-            fmt = mdates.DateFormatter("%m-%d %H:%M")
-        else:
-            fmt = mdates.DateFormatter("%Y-%m-%d")
-        ax.xaxis.set_major_formatter(fmt)
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=8))
-        for lbl in ax.get_xticklabels():
-            lbl.set_rotation(25)
-            lbl.set_ha("right")
-            lbl.set_color(self._TEXT)
-
-        ax.grid(True, color=self._GRID, linewidth=0.5, alpha=0.5)
-        ax.legend(facecolor=self._BG, edgecolor=self._GRID,
-                  labelcolor=self._TEXT, fontsize=8, loc="upper left")
-
-        self.figure.tight_layout(pad=1.2)
-        self.draw()
-
-    # ── 私有方法 ──────────────────────────────────────────
-
-    def _draw_placeholder(self) -> None:
-        """无数据时的占位提示。"""
-        ax = self._ax
-        ax.clear()
-        ax.set_facecolor(self._BG)
-        ax.text(
-            0.5, 0.5,
-            "暂无权益数据\n发生成交后自动更新",
-            ha="center", va="center",
-            color=self._BASELINE, fontsize=11,
-            transform=ax.transAxes,
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_color(self._GRID)
         self.draw()
 
 
@@ -445,17 +322,10 @@ class MainWindow(QMainWindow):
         self.fills_table.setHorizontalHeaderLabels(["时间", "代码", "方向", "数量", "价格"])
         self.fills_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
-        # ── 权益曲线控件 ──
-        self.equity_canvas = EquityCanvas(self)
-        self.equity_toolbar = NavigationToolbar2QT(self.equity_canvas, self)
-
-        # 绩效指标标签
-        self.equity_total_return_label = QLabel("--")
-        self.equity_today_pnl_label = QLabel("--")
-        self.equity_max_drawdown_label = QLabel("--")
-        self.equity_win_rate_label = QLabel("--")
-        self.equity_trade_count_label = QLabel("--")
-        self.equity_current_assets_label = QLabel("--")
+        # ── 权益曲线 Widget（独立组件，内含画布 + 工具栏 + 绩效面板）──
+        self.equity_widget = EquityCurveWidget(
+            initial_cash=self._initial_cash, parent=self
+        )
 
         # 右侧面板用 QTabWidget 承载 账户/权益/持仓/委托/成交
         self.account_tab_widget = QTabWidget()
@@ -594,39 +464,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _create_equity_tab(self) -> QWidget:
-        """权益曲线 Tab：绩效指标 + 净值曲线图 + 缩放工具栏。"""
-        w = QWidget()
-        vbox = QVBoxLayout(w)
-        vbox.setContentsMargins(4, 4, 4, 4)
-        vbox.setSpacing(4)
-
-        # ── 绩效指标网格 ─────────────────────────────────
-        stats_box = QGroupBox("绩效指标")
-        grid = QGridLayout()
-        grid.setSpacing(6)
-        grid.setContentsMargins(8, 4, 8, 4)
-
-        def _stat_row(row: int, label_text: str, value_widget: QLabel) -> None:
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet("color:#9ca3af; font-size:11px;")
-            value_widget.setStyleSheet("font-weight:bold; font-size:12px;")
-            grid.addWidget(lbl, row // 2, (row % 2) * 2)
-            grid.addWidget(value_widget, row // 2, (row % 2) * 2 + 1)
-
-        _stat_row(0, "总收益率",   self.equity_total_return_label)
-        _stat_row(1, "今日盈亏",   self.equity_today_pnl_label)
-        _stat_row(2, "最大回撤",   self.equity_max_drawdown_label)
-        _stat_row(3, "胜率",       self.equity_win_rate_label)
-        _stat_row(4, "交易次数",   self.equity_trade_count_label)
-        _stat_row(5, "当前总资产", self.equity_current_assets_label)
-
-        stats_box.setLayout(grid)
-
-        # ── 缩放工具栏 + 画布 ────────────────────────────
-        vbox.addWidget(stats_box)
-        vbox.addWidget(self.equity_toolbar)
-        vbox.addWidget(self.equity_canvas, 1)
-        return w
+        """权益曲线 Tab：直接返回独立 EquityCurveWidget 实例。"""
+        return self.equity_widget
 
     @staticmethod
     def _wrap_in_widget(table: "QTableWidget") -> QWidget:  # noqa: F821
@@ -1256,149 +1095,24 @@ class MainWindow(QMainWindow):
     # ── 权益曲线 ──────────────────────────────────────────────
 
     def refresh_equity_curve(self) -> None:
-        """刷新权益曲线面板：重绘净值图 + 更新所有绩效指标。
+        """刷新权益曲线：拉取数据后委托 EquityCurveWidget 完成绘图和指标更新。
 
         调用时机：
-        · 心跳定时器（每 15 s）
-        · 每次成交后（_auto_execute / submit_manual_order）强制调用
+        · 心跳定时器（每 15 s 触发一次，见 _on_heartbeat）
+        · 每次成交后立即强制刷新（_auto_execute / submit_manual_order）
         """
         try:
-            df = self.broker.get_equity_history()
-            self.equity_canvas.plot_equity(df, self._initial_cash)
-            self._update_perf_labels(df)
+            equity_df     = self.broker.get_equity_history()
+            fills_df      = self.broker.get_fills()
+            current_assets = self.broker.account.total_assets
+            self.equity_widget.update_equity_data(
+                equity_df,
+                initial_cash=self._initial_cash,
+                fills_df=fills_df,
+                current_assets=current_assets,
+            )
         except Exception as exc:
             self.log(f"权益曲线刷新失败：{exc}")
-
-    def _update_perf_labels(self, df: "pd.DataFrame") -> None:  # noqa: F821
-        """根据历史净值 DataFrame 计算并刷新所有绩效标签。"""
-        initial = self._initial_cash
-        current = self.broker.account.total_assets
-
-        # 当前总资产
-        self.equity_current_assets_label.setText(f"{current:,.2f}")
-        self._set_pnl_color(self.equity_current_assets_label, current - initial)
-
-        if df.empty:
-            for lbl in (
-                self.equity_total_return_label,
-                self.equity_today_pnl_label,
-                self.equity_max_drawdown_label,
-                self.equity_win_rate_label,
-                self.equity_trade_count_label,
-            ):
-                lbl.setText("--")
-            return
-
-        equity = df["total_assets"].astype(float)
-
-        # ── 总收益率 ──────────────────────────────────────
-        total_return_pct = (current - initial) / initial * 100
-        self.equity_total_return_label.setText(f"{total_return_pct:+.2f}%")
-        self._set_pnl_color(self.equity_total_return_label, total_return_pct)
-
-        # ── 今日盈亏 ──────────────────────────────────────
-        today = datetime.now().date()
-        df_today = df[pd.to_datetime(df["created_at"]).dt.date == today]
-        if len(df_today) >= 1:
-            day_start = float(df_today["total_assets"].iloc[0])
-            today_pnl = current - day_start
-        else:
-            today_pnl = current - initial
-        self.equity_today_pnl_label.setText(f"{today_pnl:+,.2f}")
-        self._set_pnl_color(self.equity_today_pnl_label, today_pnl)
-
-        # ── 最大回撤 ──────────────────────────────────────
-        nav = equity / initial
-        rolling_max = nav.cummax()
-        drawdown = (nav - rolling_max) / rolling_max
-        max_dd_pct = float(drawdown.min()) * 100          # 负数
-        self.equity_max_drawdown_label.setText(f"{max_dd_pct:.2f}%")
-        self.equity_max_drawdown_label.setStyleSheet(
-            "font-weight:bold; font-size:12px; color:#ef4444;" if max_dd_pct < -0.5
-            else "font-weight:bold; font-size:12px;"
-        )
-
-        # ── 胜率 + 交易次数（FIFO 配对法）──────────────────
-        try:
-            fills_df = self.broker.get_fills()
-            wins, total_trades = self._compute_trade_stats(fills_df)
-            win_rate = wins / total_trades * 100 if total_trades > 0 else 0.0
-            self.equity_win_rate_label.setText(
-                f"{win_rate:.1f}%  ({wins}/{total_trades})" if total_trades else "--"
-            )
-            self.equity_trade_count_label.setText(str(total_trades) if total_trades else "--")
-            self._set_pnl_color(self.equity_win_rate_label, win_rate - 50)  # 50% 为分界
-        except Exception:
-            self.equity_win_rate_label.setText("--")
-            self.equity_trade_count_label.setText("--")
-
-    @staticmethod
-    def _compute_trade_stats(fills_df: "pd.DataFrame") -> tuple[int, int]:  # noqa: F821
-        """用 FIFO 配对法计算盈亏次数和总成交次数。
-
-        Returns:
-            (wins, total_closed_trades)
-            wins:  盈利的完整交易（买卖对）数量
-            total: 完成的完整交易数量
-        """
-        if fills_df is None or fills_df.empty:
-            return 0, 0
-
-        df = fills_df.sort_values("filled_at").copy()
-        # 每个股票的未平仓买入队列：[(qty, price), ...]
-        open_lots: dict[str, list[tuple[int, float]]] = {}
-        wins = 0
-        total = 0
-
-        for _, row in df.iterrows():
-            symbol = str(row["symbol"])
-            qty = int(row["quantity"])
-            price = float(row["price"])
-            side = str(row["side"])
-
-            if side == "BUY":
-                open_lots.setdefault(symbol, []).append((qty, price))
-
-            elif side == "SELL":
-                queue = open_lots.get(symbol, [])
-                if not queue:
-                    continue
-
-                # FIFO 出仓，计算本次卖出的平均成本
-                remaining_sell = qty
-                cost_total = 0.0
-                cost_qty = 0
-
-                while remaining_sell > 0 and queue:
-                    lot_qty, lot_price = queue[0]
-                    take = min(remaining_sell, lot_qty)
-                    cost_total += take * lot_price
-                    cost_qty += take
-                    remaining_sell -= take
-                    if take == lot_qty:
-                        queue.pop(0)
-                    else:
-                        queue[0] = (lot_qty - take, lot_price)
-
-                if cost_qty > 0:
-                    avg_cost = cost_total / cost_qty
-                    pnl = (price - avg_cost) * cost_qty
-                    total += 1
-                    if pnl > 0:
-                        wins += 1
-
-        return wins, total
-
-    @staticmethod
-    def _set_pnl_color(label: "QLabel", value: float) -> None:  # noqa: F821
-        """正值绿色、负值红色、零值默认色。"""
-        base = "font-weight:bold; font-size:12px;"
-        if value > 0:
-            label.setStyleSheet(base + " color:#22c55e;")
-        elif value < 0:
-            label.setStyleSheet(base + " color:#ef4444;")
-        else:
-            label.setStyleSheet(base)
 
     # ── 回测 ────────────────────────────────────────────────
 
