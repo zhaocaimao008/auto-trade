@@ -639,7 +639,7 @@ class MainWindow(QMainWindow):
         self.market_table.itemSelectionChanged.connect(self.on_market_selection_changed)
 
         self.start_button.clicked.connect(self.start_trading)
-        self.trusted_checkbox.toggled.connect(lambda checked: setattr(self, '_trusted_mode', checked))
+        self.trusted_checkbox.toggled.connect(self._on_trusted_toggled)
         self.pause_button.clicked.connect(self.pause_trading)
         self.stop_button.clicked.connect(self.stop_trading)
         self.buy_button.clicked.connect(lambda: self.submit_manual_order("BUY"))
@@ -699,6 +699,38 @@ class MainWindow(QMainWindow):
             self._position_cache_ts = now
         except Exception:
             pass  # 缓存刷新失败不影响主流程
+
+    def _build_risk_context(self):
+        """为风控检查构建 StrategyContext。"""
+        from autotrader_app.strategies.base import StrategyContext
+
+        positions: dict[str, int] = {}
+        prices: dict[str, float] = {}
+        market_value = 0.0
+
+        for sym, info in self._position_cache.items():
+            qty = int(info["quantity"])
+            price = float(info["avg_price"])
+            positions[sym] = qty
+            market_value += qty * price
+
+        for sym, bars in self.latest_bar_cache.items():
+            if bars is not None and not bars.empty:
+                prices[sym] = float(bars.iloc[-1]["close"])
+
+        total = (
+            self.broker.account.total_assets
+            if hasattr(self.broker.account, 'total_assets') and self.broker.account.total_assets > 0
+            else getattr(self.broker.account, 'cash', 100_000)
+        )
+
+        return StrategyContext(
+            total_capital=total,
+            available_cash=getattr(self.broker.account, 'cash', 0),
+            total_position_ratio=market_value / total if total > 0 else 0.0,
+            positions=positions,
+            latest_prices=prices,
+        )
 
     def _on_engine_tick(self) -> None:
         """引擎周期：行情刷新 + 策略评估 + 自动执行。
@@ -1274,14 +1306,17 @@ class MainWindow(QMainWindow):
     ) -> None:
         """引擎运行时自动执行策略信号。
 
-        Args:
-            symbol:        股票代码。
-            decision:      策略决策对象（含 signal / suggested_quantity / price）。
-            strategy_name: 触发该信号的策略名称，写入成交记录，用于多策略净值对比。
+        执行前经过完整风控链路：
+          1. 风控 check_entry（白名单/金额/间隔/仓位）
+          2. 实盘二次确认（trusted 模式跳过）
+          3. 成交后 record_trade 更新统计
         """
         from autotrader_app.strategies.base import StrategySignal
 
         if not hasattr(decision, "signal"):
+            return
+
+        if decision.signal == StrategySignal.HOLD:
             return
 
         desc = (
@@ -1289,7 +1324,17 @@ class MainWindow(QMainWindow):
             f"{symbol} x{decision.suggested_quantity} @ {decision.price:.2f}"
         )
 
-        # 实盘模式下自动执行前弹窗确认（trusted 模式启用时跳过）
+        # ── 1. 风控前置检查（所有模式均生效）───────────────
+        if decision.signal == StrategySignal.BUY and decision.suggested_quantity > 0:
+            ctx = self._build_risk_context()
+            risk_ok, risk_msg = self.risk_manager.check_entry(
+                symbol, decision.price, decision.suggested_quantity, ctx,
+            )
+            if not risk_ok:
+                self.log(f"🛡️ [{strategy_name}] 风控拦截买入 {symbol}：{risk_msg}")
+                return
+
+        # ── 2. 实盘二次确认 ──────────────────────────────
         if not self._confirm_live_order(desc, trusted=True):
             self.log(f"用户取消自动执行：{desc}")
             return
@@ -1453,6 +1498,37 @@ class MainWindow(QMainWindow):
         if not self._confirm_live_order(desc):
             self.log(f"用户取消：{desc}")
             return
+
+        # 实盘资金影响预览
+        if self._is_live_trading:
+            try:
+                with get_session() as session:
+                    current_positions = PositionRepository(session).list_all()
+                current_cash = float(getattr(self.broker.account, 'cash', 0))
+                total_amount = lot_size * last_price
+                preview = (
+                    f"【资金影响预览】\n\n"
+                    f"操作：{'买入' if side.upper() == 'BUY' else '卖出'} {symbol}\n"
+                    f"数量：{lot_size} 股 × {last_price:.2f} = {total_amount:.2f} 元\n"
+                    f"当前可用资金：{current_cash:,.2f}\n"
+                )
+                if side.upper() == 'BUY':
+                    preview += f"预计成交后资金：{current_cash - total_amount:,.2f}\n"
+                    preview += f"预计持仓市值增加：{total_amount:,.2f}"
+                else:
+                    preview += f"预计成交后资金：{current_cash + total_amount:,.2f}\n"
+                    existing = next((p for p in current_positions if p.symbol == symbol), None)
+                    preview += f"当前 {symbol} 持仓：{existing.quantity if existing else 0} 股"
+                resp = QMessageBox.information(
+                    self, "资金影响预览", preview,
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Ok,
+                )
+                if resp != QMessageBox.StandardButton.Ok:
+                    self.log("用户取消：资金影响预览")
+                    return
+            except Exception:
+                pass
 
         try:
             result = self.trading_service.submit_manual_order(symbol, side, lot_size, last_price)
@@ -1650,6 +1726,29 @@ class MainWindow(QMainWindow):
         else:
             if hasattr(self, "_live_warning_label") and self._live_warning_label is not None:
                 self._live_warning_label.setVisible(False)
+
+    def _on_trusted_toggled(self, checked: bool) -> None:
+        """免确认复选框切换：实盘模式下弹出最终警告。"""
+        self._trusted_mode = checked
+        if checked and self._is_live_trading:
+            resp = QMessageBox.warning(
+                self,
+                "⚠️ 实盘自动执行已启用",
+                "您已启用「自动执行免确认」模式。\n\n"
+                "这意味着策略引擎产生的所有买卖信号将：\n"
+                "  · 自动发送真实委托到券商\n"
+                "  · 不再弹窗确认\n"
+                "  · 但仍受风控规则保护\n\n"
+                "请确认已理解风险并设置了合理的风控参数。",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if resp != QMessageBox.StandardButton.Ok:
+                self._trusted_mode = False
+                self.trusted_checkbox.setChecked(False)
+                self.log("用户取消启用自动执行免确认")
+            else:
+                self.log("⚠️ 自动执行免确认已启用，策略信号将自动执行")
 
     def export_logs(self) -> None:
         target, _ = QFileDialog.getSaveFileName(self, "导出日志",
