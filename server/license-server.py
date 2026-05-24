@@ -11,12 +11,14 @@ import time
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
+import io
 
 app = Flask(__name__)
 
-ADMIN_PASSWORD = "admin123456"  # ⚠️ 改成你自己的密码
+ADMIN_PASSWORD = "gutao20080"
 DB_FILE = Path(__file__).parent / "licenses.json"
+QR_FILE = Path(__file__).parent / "qrcode.png"
 
 
 def load() -> dict:
@@ -163,6 +165,31 @@ def delete_key():
 
 
 # ────────────────────────────────────────────────────────────
+# 收款码管理
+# ────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/qrcode", methods=["GET"])
+def get_qrcode():
+    if QR_FILE.exists():
+        return send_file(str(QR_FILE), mimetype="image/png")
+    return jsonify({"success": False, "message": "未上传收款码"}), 404
+
+@app.route("/api/auth/qrcode/upload", methods=["POST"])
+def upload_qrcode():
+    data = request.get_json(force=True, silent=True)
+    if not data or data.get("admin_key") != ADMIN_PASSWORD:
+        return jsonify({"success": False, "message": "管理员密码错误"}), 200
+    import base64
+    img = data.get("image", "")
+    if not img:
+        return jsonify({"success": False, "message": "请提供图片"}), 400
+    if "," in img:
+        img = img.split(",")[1]
+    QR_FILE.write_bytes(base64.b64decode(img))
+    return jsonify({"success": True, "message": "收款码已更新"})
+
+
+# ────────────────────────────────────────────────────────────
 # 管理后台网页
 # ────────────────────────────────────────────────────────────
 
@@ -210,26 +237,31 @@ th { color:#94a3b8; font-weight:500; font-size:12px; text-transform:uppercase; }
 <p class="sub">生成 / 管理软件授权码</p>
 
 <div class="card">
-<h3 style="margin-bottom:8px;">生成授权码</h3>
+<h3>生成授权码</h3>
 <div class="row"><label>时长</label>
 <select id="duration">
-<option value="1h">1 小时</option>
-<option value="6h">6 小时</option>
-<option value="12h">12 小时</option>
-<option value="1d">1 天</option>
-<option value="3d">3 天</option>
-<option value="7d">7 天</option>
-<option value="14d">14 天</option>
-<option value="30d" selected>30 天</option>
-<option value="60d">60 天</option>
-<option value="90d">90 天</option>
-<option value="180d">180 天</option>
-<option value="365d">365 天</option>
-<option value="永久">永久</option>
-</select></div>
-<div class="row"><label>备注</label><input type="text" id="remark" placeholder="买家名称/用途"></div>
+<option value="1h">1 小时</option><option value="6h">6 小时</option><option value="12h">12 小时</option>
+<option value="1d">1 天</option><option value="3d">3 天</option><option value="7d">7 天</option>
+<option value="14d">14 天</option><option value="30d" selected>30 天</option><option value="60d">60 天</option>
+<option value="90d">90 天</option><option value="180d">180 天</option><option value="365d">365 天</option>
+<option value="永久">永久</option></select></div>
+<div class="row"><label>备注</label><input type="text" id="remark" placeholder="买家名称"></div>
+<div class="row"><label>价格</label><input type="text" id="price" placeholder="99" style="width:80px"> 元</div>
 <div class="row"><button class="btn btn-success" onclick="generate()">生成授权码</button></div>
-<div id="result"></div>
+<div id="result" style="font-size:14px;font-weight:bold;"></div>
+</div>
+
+<div class="card">
+<h3>💰 收款码</h3>
+<div class="row">
+<input type="file" id="qrInput" accept="image/*" style="display:none" onchange="previewQR(event)">
+<button class="btn" onclick="document.getElementById('qrInput').click()">选择图片</button>
+<button class="btn btn-success" onclick="uploadQR()">上传</button>
+</div>
+<div class="row" id="qrPreview" style="display:none;">
+<img id="qrImg" style="max-width:180px;border:2px solid #475569;border-radius:4px;">
+</div>
+<div id="qrStatus"></div>
 </div>
 
 <div class="card">
@@ -279,6 +311,25 @@ async function loadList() {
         <td><button class="btn btn-danger" onclick="delKey('${l.key}')">删除</button></td>
     </tr>`).join('');
 }
+
+let qrDataUrl = '';
+function previewQR(e) {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = ev => { qrDataUrl = ev.target.result; document.getElementById('qrImg').src = qrDataUrl; document.getElementById('qrPreview').style.display = 'block'; };
+    r.readAsDataURL(f);
+}
+async function uploadQR() {
+    if (!qrDataUrl) { document.getElementById('qrStatus').innerHTML = '请先选择图片'; return; }
+    const r = await fetch('/api/auth/qrcode/upload', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({admin_key:PWD, image:qrDataUrl}) });
+    const j = await r.json();
+    document.getElementById('qrStatus').innerHTML = j.success ? '\u2705 \u5df2\u66f4\u65b0' : '\u274c \u5931\u8d25';
+}
+async function loadQR() {
+    const r = await fetch('/api/auth/qrcode');
+    if (r.ok) { document.getElementById('qrImg').src = '/api/auth/qrcode?' + Date.now(); document.getElementById('qrPreview').style.display = 'block'; }
+}
+loadQR();
 loadList();
 </script>
 </body></html>"""
