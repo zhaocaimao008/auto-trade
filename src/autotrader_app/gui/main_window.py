@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 )
 
 from autotrader_app.backtest.engine import BacktestEngine
+from autotrader_app.broker import create_broker
 from autotrader_app.broker.mock_broker import MockBroker
 from autotrader_app.config import BASE_DIR, check_config, get_settings
 from autotrader_app.data.providers import DataProviderFactory
@@ -75,33 +76,92 @@ class StrategyDefinition:
 
 
 class SettingsDialog(QDialog):
-    """配置对话框。"""
+    """系统配置对话框（数据源 + Broker + EasyTrader）。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("系统配置")
-        self.resize(460, 220)
+        self.resize(520, 420)
 
         settings = get_settings()
-        self.tushare_token_input = QLineEdit(settings.tushare_token)
-        self.broker_name_input = QLineEdit("MockBroker")
-        self.broker_account_input = QLineEdit("SIM-001")
-        self.data_source_input = QLineEdit(settings.default_data_source)
 
-        form = QFormLayout()
-        form.addRow("Tushare Token", self.tushare_token_input)
-        form.addRow("券商名称", self.broker_name_input)
-        form.addRow("券商账户", self.broker_account_input)
-        form.addRow("默认数据源", self.data_source_input)
+        # ── 数据源 ───────────────────────────────────────────
+        self.data_source_input = QLineEdit(settings.default_data_source)
+        self.tushare_token_input = QLineEdit(settings.tushare_token)
+
+        # ── Broker ───────────────────────────────────────────
+        self.broker_type_combo = QComboBox()
+        self.broker_type_combo.addItems(["mock", "easytrader"])
+        self.broker_type_combo.setCurrentText(settings.broker_type)
+
+        # ── EasyTrader ──────────────────────────────────────
+        self.et_broker_type_input = QLineEdit(settings.easytrader_broker_type)
+        self.et_account_input = QLineEdit(settings.easytrader_account)
+        self.et_password_input = QLineEdit(settings.easytrader_password)
+        self.et_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.et_exe_path_input = QLineEdit(settings.easytrader_exe_path)
+        self.et_exe_browse_button = QPushButton("浏览...")
+
+        # 实盘开关
+        self.live_checkbox = QCheckBox("启用实盘交易（本软件不承担任何损失）")
+        self.live_checkbox.setChecked(settings.is_live_trading)
+        self.live_checkbox.setStyleSheet("color:#ef4444; font-weight:bold;")
+
+        # Broker 类型联动
+        self.broker_type_combo.currentTextChanged.connect(self._on_broker_type_changed)
+        self.et_exe_browse_button.clicked.connect(self._browse_exe)
+
+        # ── 布局 ─────────────────────────────────────────────
+        tabs = QTabWidget()
+
+        # Tab 1: 数据源
+        ds_tab = QWidget()
+        ds_form = QFormLayout(ds_tab)
+        ds_form.addRow("默认数据源", self.data_source_input)
+        ds_form.addRow("Tushare Token", self.tushare_token_input)
+        tabs.addTab(ds_tab, "数据源")
+
+        # Tab 2: Broker
+        broker_tab = QWidget()
+        broker_form = QFormLayout(broker_tab)
+        broker_form.addRow("Broker 类型", self.broker_type_combo)
+
+        et_group = QGroupBox("EasyTrader 配置")
+        et_form = QFormLayout(et_group)
+        et_form.addRow("券商类型", self.et_broker_type_input)
+        et_form.addRow("账号", self.et_account_input)
+        et_form.addRow("密码", self.et_password_input)
+        exe_row = QHBoxLayout()
+        exe_row.addWidget(self.et_exe_path_input)
+        exe_row.addWidget(self.et_exe_browse_button)
+        et_form.addRow("客户端路径", exe_row)
+        et_form.addRow("", self.live_checkbox)
+        broker_form.addRow(et_group)
+        tabs.addTab(broker_tab, "Broker")
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addWidget(button_box)
         self.setLayout(layout)
+
+        self._on_broker_type_changed(self.broker_type_combo.currentText())
+
+    def _on_broker_type_changed(self, broker_type: str) -> None:
+        """Broker 类型切换时显示/隐藏 EasyTrader 配置区。"""
+        is_et = broker_type == "easytrader"
+        for w in self.findChildren(QGroupBox):
+            if w.title() == "EasyTrader 配置":
+                w.setVisible(is_et)
+                break
+
+    def _browse_exe(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择券商客户端", "", "Executable (*.exe);;All Files (*)")
+        if path:
+            self.et_exe_path_input.setText(path)
 
 
 class MplKLineCanvas(FigureCanvasQTAgg):
@@ -165,7 +225,16 @@ class MainWindow(QMainWindow):
 
         self.provider = DataProviderFactory.create(get_settings().default_data_source)
         self._initial_cash: float = 100_000.0          # 初始资金（绘制净值曲线基准）
-        self.broker = MockBroker(initial_cash=self._initial_cash)
+
+        # Broker 创建：根据配置选择 Mock 或 EasyTrader
+        settings = get_settings()
+        self._is_live_trading = settings.is_live_trading
+        if self._is_live_trading:
+            self.broker = create_broker(broker_type="easytrader", is_live=True)
+            self.broker_type_label = "实盘"
+        else:
+            self.broker = MockBroker(initial_cash=self._initial_cash)
+            self.broker_type_label = "模拟"
         self.trading_service = TradingService(provider=self.provider, broker=self.broker)
         self.backtest_engine = BacktestEngine()
 
@@ -198,6 +267,7 @@ class MainWindow(QMainWindow):
         self._market_refresh_tick = 0  # 计数用
         self._position_cache: dict[str, dict] = {}  # symbol -> {quantity, avg_price}
         self._position_cache_ts: float = 0.0  # 上一次刷新持仓的时间戳
+        self._live_warning_label: QLabel | None = None
 
         self._build_menu()
         self._build_status_bar()
@@ -213,9 +283,10 @@ class MainWindow(QMainWindow):
         self.refresh_signal_table()
         self.refresh_equity_curve()          # 启动时加载历史权益曲线（如有）
 
-        # 配置状态检查
+        # 配置状态检查与实盘警告
         for warn in check_config():
             self.log(f"⚠️ {warn}")
+        self._update_live_warning()
         self.log("系统启动完成。初始监控: " + ", ".join(self.watchlist))
 
     # ── 菜单 ────────────────────────────────────────────────
@@ -250,6 +321,16 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.market_status_label)
         status.addPermanentWidget(self.provider_status_label)
         status.addPermanentWidget(self.system_time_label)
+
+        # Broker 类型与实盘警告
+        self.broker_status_label = QLabel(f"Broker：{self.broker_type_label}")
+        status.addPermanentWidget(self.broker_status_label)
+        if self._is_live_trading:
+            self.live_warning_label = QLabel("🔴 实盘模式")
+            self.live_warning_label.setStyleSheet(
+                "background-color:#ef4444; color:white; font-weight:bold; padding:2px 8px; border-radius:3px;"
+            )
+            status.addPermanentWidget(self.live_warning_label)
 
     # ── 控件创建 ───────────────────────────────────────────
 
@@ -1168,35 +1249,86 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
         if dialog.exec():
-            # 回写 .env 文件
             env_path = BASE_DIR / ".env"
-            token = dialog.tushare_token_input.text().strip()
+            settings = get_settings()
+
+            # ── 收集表单值 ───────────────────────────────────
             ds = dialog.data_source_input.text().strip() or "akshare"
+            token = dialog.tushare_token_input.text().strip()
+            broker_type = dialog.broker_type_combo.currentText()
+            et_type = dialog.et_broker_type_input.text().strip() or "ht"
+            et_acct = dialog.et_account_input.text().strip()
+            et_pwd = dialog.et_password_input.text().strip()
+            et_exe = dialog.et_exe_path_input.text().strip()
+            live_mode = "easytrader" if dialog.live_checkbox.isChecked() else "mock"
+
             try:
-                lines = []
+                # ── 读取 / 回写 .env ─────────────────────────
+                lines: list[str] = []
                 if env_path.exists():
                     lines = env_path.read_text(encoding="utf-8").splitlines()
-                # 更新或追加 TUSHARE_TOKEN
-                found_token = found_ds = False
+
+                kv_map: dict[str, str] = {
+                    "TUSHARE_TOKEN": token,
+                    "DEFAULT_DATA_SOURCE": ds,
+                    "BROKER_TYPE": broker_type,
+                    "EASYTRADER_BROKER_TYPE": et_type,
+                    "EASYTRADER_ACCOUNT": et_acct,
+                    "EASYTRADER_PASSWORD": et_pwd,
+                    "EASYTRADER_EXE_PATH": et_exe,
+                }
+                seen: set[str] = set()
                 for i, line in enumerate(lines):
-                    if line.startswith("TUSHARE_TOKEN="):
-                        lines[i] = f"TUSHARE_TOKEN={token}"
-                        found_token = True
-                    elif line.startswith("DEFAULT_DATA_SOURCE="):
-                        lines[i] = f"DEFAULT_DATA_SOURCE={ds}"
-                        found_ds = True
-                if not found_token:
-                    lines.append(f"TUSHARE_TOKEN={token}")
-                if not found_ds:
-                    lines.append(f"DEFAULT_DATA_SOURCE={ds}")
+                    for key in kv_map:
+                        if line.startswith(f"{key}="):
+                            lines[i] = f"{key}={kv_map[key]}"
+                            seen.add(key)
+                for key, val in kv_map.items():
+                    if key not in seen:
+                        lines.append(f"{key}={val}")
                 env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                # 清除配置缓存，下次读取为新值
                 get_settings.cache_clear()
                 self.log("配置已保存到 .env 文件。")
             except Exception as exc:
                 self.log(f"保存配置失败：{exc}")
 
-            self.provider_status_label.setText(f"数据源：{ds}"))
+            # ── 更新 UI ─────────────────────────────────────
+            self.provider_status_label.setText(f"数据源：{ds}")
+
+            # ── 重建 Broker（若类型或 live 状态有变化）──────
+            new_is_live = live_mode == "easytrader"
+            if new_is_live != self._is_live_trading or broker_type != settings.broker_type:
+                self._is_live_trading = new_is_live
+                if self._is_live_trading:
+                    self.broker = create_broker(broker_type="easytrader", is_live=True)
+                    self.broker_type_label = "实盘"
+                else:
+                    self.broker = MockBroker(initial_cash=self._initial_cash)
+                    self.broker_type_label = "模拟"
+                self.trading_service.broker = self.broker
+                self.broker_status_label.setText(f"Broker：{self.broker_type_label}")
+                self.log(f"Broker 已切换为: {self.broker_type_label}")
+                self.refresh_account_views()
+
+            # ── 实盘警告标签动态管理 ──────────────────────────
+            self._update_live_warning()
+
+    def _update_live_warning(self) -> None:
+        """根据 _is_live_trading 状态显示/隐藏实盘警告标签。"""
+        status = self.statusBar()
+        if self._is_live_trading:
+            if not hasattr(self, "_live_warning_label") or self._live_warning_label is None:
+                lbl = QLabel("🔴 实盘模式")
+                lbl.setStyleSheet(
+                    "background-color:#ef4444; color:white; font-weight:bold; padding:2px 8px; border-radius:3px;"
+                )
+                status.addPermanentWidget(lbl)
+                self._live_warning_label = lbl
+            else:
+                self._live_warning_label.setVisible(True)
+        else:
+            if hasattr(self, "_live_warning_label") and self._live_warning_label is not None:
+                self._live_warning_label.setVisible(False)
 
     def export_logs(self) -> None:
         target, _ = QFileDialog.getSaveFileName(self, "导出日志",
