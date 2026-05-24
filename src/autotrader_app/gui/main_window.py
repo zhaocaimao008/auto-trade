@@ -289,6 +289,8 @@ class MainWindow(QMainWindow):
             StrategyDefinition(name="MACD趋势策略", strategy_type="MACD趋势", fast_window=12, slow_window=26, signal_period=9),
             StrategyDefinition(name="RSI策略", strategy_type="RSI", rsi_period=14, rsi_oversold=30.0, rsi_overbought=70.0),
             StrategyDefinition(name="布林带策略", strategy_type="布林带", bb_window=20, bb_num_std=2.0),
+            StrategyDefinition(name="海龟策略", strategy_type="海龟", fast_window=20, slow_window=10),
+            StrategyDefinition(name="通道突破", strategy_type="通道突破", fast_window=20, slow_window=10),
         ]
         self.watchlist: list[str] = ["000001", "600519", "000858", "601318"]
         self.latest_bar_cache: dict[str, pd.DataFrame] = {}
@@ -356,6 +358,12 @@ class MainWindow(QMainWindow):
         bt_act = QAction("运行当前股票回测", self)
         bt_act.triggered.connect(self.run_backtest_for_selected_symbol)
         bt_menu.addAction(bt_act)
+        bt_export = QAction("导出回测报告(CSV)", self)
+        bt_export.triggered.connect(self.export_backtest_csv)
+        bt_menu.addAction(bt_export)
+        bt_export_html = QAction("导出回测报告(HTML)", self)
+        bt_export_html.triggered.connect(self.export_backtest_html)
+        bt_menu.addAction(bt_export_html)
 
         ex_menu = menu_bar.addMenu("导出")
         ex_act = QAction("导出日志", self)
@@ -1284,12 +1292,13 @@ class MainWindow(QMainWindow):
                         )
                     elif strategy.strategy_type == "布林带":
                         from autotrader_app.strategies.bollinger_strategy import BollingerBandsStrategy
-                        temp_strategy = BollingerBandsStrategy(
-                            window=strategy.bb_window,
-                            num_std=strategy.bb_num_std,
-                            symbol_list=self.watchlist,
-                            position_ratio=0.2,
-                        )
+                        temp_strategy = BollingerBandsStrategy(window=strategy.bb_window, num_std=strategy.bb_num_std, symbol_list=self.watchlist, position_ratio=0.2)
+                    elif strategy.strategy_type == "海龟":
+                        from autotrader_app.strategies.turtle_strategy import TurtleTradingStrategy
+                        temp_strategy = TurtleTradingStrategy(entry_period=strategy.fast_window, exit_period=strategy.slow_window, symbol_list=self.watchlist, position_ratio=0.2)
+                    elif strategy.strategy_type == "通道突破":
+                        from autotrader_app.strategies.channel_breakout import ChannelBreakoutStrategy
+                        temp_strategy = ChannelBreakoutStrategy(entry_period=strategy.fast_window, exit_period=strategy.slow_window, symbol_list=self.watchlist, position_ratio=0.2)
                     else:
                         temp_strategy = DoubleMA_Strategy(short_window=strategy.fast_window, long_window=strategy.slow_window, symbol_list=self.watchlist, position_ratio=0.2)
 
@@ -1680,6 +1689,9 @@ class MainWindow(QMainWindow):
             slow = strategy.slow_window if strategy else 20
             size = strategy.lot_size if strategy else 100
             result = self.backtest_engine.run_ma_cross(bars, fast=fast, slow=slow, size=size)
+            self._last_backtest_result = result
+            self._last_backtest_symbol = symbol
+            self._last_backtest_bars = bars
             self.log(
                 f"📊 回测 [{symbol}] MA{fast}/{slow} | "
                 f"起始{result.starting_cash:,.0f} → 终值{result.final_value:,.0f} "
@@ -1687,6 +1699,52 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self._show_error(exc)
+
+    # ── 回测报告导出 ────────────────────────────────────
+
+    def export_backtest_csv(self) -> None:
+        if not hasattr(self, '_last_backtest_result'):
+            QMessageBox.information(self, "提示", "请先运行一次回测。")
+            return
+        from autotrader_app.backtest.report import compute_report, export_report_csv
+        strategy = self.current_strategy()
+        report = compute_report(
+            trades=[], equity_curve=pd.DataFrame(),
+            starting_cash=self._last_backtest_result.starting_cash,
+            symbol=self._last_backtest_symbol,
+            strategy_name=strategy.name if strategy else "双均线",
+            parameters={"fast": strategy.fast_window if strategy else 5, "slow": strategy.slow_window if strategy else 20},
+        )
+        report.total_pnl = self._last_backtest_result.pnl
+        report.final_value = self._last_backtest_result.final_value
+        report.total_return_pct = (report.total_pnl / report.starting_cash) * 100
+        default_name = f"backtest_{self._last_backtest_symbol}_{datetime.now():%Y%m%d_%H%M}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "导出回测报告", str(BASE_DIR / default_name), "CSV Files (*.csv)")
+        if not path: return
+        export_report_csv(report, path)
+        self.log(f"📄 回测报告已导出: {path}")
+
+    def export_backtest_html(self) -> None:
+        if not hasattr(self, '_last_backtest_result'):
+            QMessageBox.information(self, "提示", "请先运行一次回测。")
+            return
+        from autotrader_app.backtest.report import compute_report, export_report_html
+        strategy = self.current_strategy()
+        report = compute_report(
+            trades=[], equity_curve=pd.DataFrame(),
+            starting_cash=self._last_backtest_result.starting_cash,
+            symbol=self._last_backtest_symbol,
+            strategy_name=strategy.name if strategy else "双均线",
+            parameters={"fast": strategy.fast_window if strategy else 5, "slow": strategy.slow_window if strategy else 20},
+        )
+        report.total_pnl = self._last_backtest_result.pnl
+        report.final_value = self._last_backtest_result.final_value
+        report.total_return_pct = (report.total_pnl / report.starting_cash) * 100
+        default_name = f"backtest_{self._last_backtest_symbol}_{datetime.now():%Y%m%d_%H%M}.html"
+        path, _ = QFileDialog.getSaveFileName(self, "导出回测报告", str(BASE_DIR / default_name), "HTML Files (*.html)")
+        if not path: return
+        export_report_html(report, path)
+        self.log(f"📄 回测报告已导出: {path}")
 
     # ── 设置 / 导出 ────────────────────────────────────────
 
