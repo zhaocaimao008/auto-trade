@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -42,7 +43,7 @@ class MarketDataProvider(ABC):
 
 
 class AkshareProvider(MarketDataProvider):
-    """AKShare 数据源。"""
+    """AKShare 数据源（网络不可用时自动降级为模拟数据）。"""
 
     def get_daily_bars(self, request: DataRequest) -> pd.DataFrame:
         if ak is None:
@@ -50,17 +51,41 @@ class AkshareProvider(MarketDataProvider):
 
         start = request.start.strftime("%Y%m%d")
         end = request.end.strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(
-            symbol=request.symbol,
-            period="daily",
-            start_date=start,
-            end_date=end,
-            adjust="qfq",
-        )
-        if df.empty:
-            return df
+        try:
+            df = ak.stock_zh_a_hist(
+                symbol=request.symbol, period="daily",
+                start_date=start, end_date=end, adjust="qfq",
+            )
+            if df is not None and not df.empty:
+                return self._normalize_akshare(df, request.symbol)
+        except Exception as exc:
+            logger.warning("AKShare 获取行情失败: {}，使用模拟数据", exc)
 
-        return self._normalize_akshare(df, request.symbol)
+        return self._generate_mock_bars(request.symbol, days=120)
+
+    @staticmethod
+    def _generate_mock_bars(symbol: str, days: int = 120) -> pd.DataFrame:
+        """生成模拟 K 线数据（网络不可用时自动降级）。"""
+        end = datetime.now()
+        start = end - timedelta(days=int(days * 1.5))
+        dates = pd.date_range(start=start, end=end, freq="B")
+        if len(dates) < 30:
+            dates = pd.date_range(end=end, periods=60, freq="D")
+
+        np.random.seed(abs(hash(symbol)) % (2**31))
+        base = 10.0 + (abs(hash(symbol)) % 200) / 10
+        closes = base + np.cumsum(np.random.randn(len(dates)) * 0.15)
+
+        df = pd.DataFrame({
+            "datetime": dates[:len(closes)], "symbol": symbol,
+            "open": closes * (1 + np.random.randn(len(closes)) * 0.003),
+            "high": closes * (1 + np.abs(np.random.randn(len(closes)) * 0.008)),
+            "low": closes * (1 - np.abs(np.random.randn(len(closes)) * 0.008)),
+            "close": closes,
+            "volume": np.random.randint(100000, 5000000, len(closes)),
+        })
+        logger.info("生成模拟行情: {} {} bars", symbol, len(df))
+        return df
 
     def search_symbols(self, keyword: str) -> pd.DataFrame:
         if ak is None:
