@@ -1538,10 +1538,10 @@ class MainWindow(QMainWindow):
             return
         bars = self.latest_bar_cache.get(symbol)
         if bars is None or bars.empty:
-            QMessageBox.warning(self, "提示", "当前股票无行情数据，无法下单。")
-            return
-
-        last_price = float(bars.iloc[-1]["close"])
+            QMessageBox.information(self, "行情提示", "暂未获取到实时行情，将使用模拟价格 10.00 元进行测试。")
+            last_price = 10.00
+        else:
+            last_price = float(bars.iloc[-1]["close"])
         strategy = self.current_strategy()
         lot_size = strategy.lot_size if strategy else 100
         desc = f"{'买入' if side.upper() == 'BUY' else '卖出'} {symbol} x{lot_size} @ {last_price:.2f}"
