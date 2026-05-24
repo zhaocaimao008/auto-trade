@@ -190,6 +190,148 @@ def upload_qrcode():
 
 
 # ────────────────────────────────────────────────────────────
+# 商品配置
+# ────────────────────────────────────────────────────────────
+
+PRODUCTS_FILE = Path(__file__).parent / "products.json"
+
+def load_products() -> list[dict]:
+    if PRODUCTS_FILE.exists():
+        return json.loads(PRODUCTS_FILE.read_text("utf-8"))
+    return [
+        {"id": 1, "name": "1 小时体验", "duration": "1h", "price": 1},
+        {"id": 2, "name": "1 天试用", "duration": "1d", "price": 5},
+        {"id": 3, "name": "7 天", "duration": "7d", "price": 20},
+        {"id": 4, "name": "30 天", "duration": "30d", "price": 50},
+        {"id": 5, "name": "365 天", "duration": "365d", "price": 299},
+        {"id": 6, "name": "永久", "duration": "永久", "price": 999},
+    ]
+
+def save_products(data: list) -> None:
+    PRODUCTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+@app.route("/api/auth/products", methods=["GET"])
+def get_products():
+    p = load_products()
+    return jsonify({"success": True, "products": p, "has_qrcode": QR_FILE.exists()})
+
+@app.route("/api/auth/products/save", methods=["POST"])
+def save_products_api():
+    data = request.get_json(force=True, silent=True)
+    if not data or data.get("admin_key") != ADMIN_PASSWORD:
+        return jsonify({"success": False, "message": "管理员密码错误"}), 200
+    save_products(data.get("products", []))
+    return jsonify({"success": True, "message": "已保存"})
+
+
+# ────────────────────────────────────────────────────────────
+# 购买接口
+# ────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/buy", methods=["POST"])
+def buy():
+    data = request.get_json(force=True, silent=True)
+    if not data: return jsonify({"success": False}), 400
+    pid = data.get("product_id")
+    products = load_products()
+    product = next((p for p in products if p["id"] == pid), None)
+    if not product: return jsonify({"success": False, "message": "商品不存在"}), 200
+
+    key = new_key()
+    seconds = parse_duration(product["duration"])
+    db = load()
+    db[key] = {
+        "created_at": time.time(),
+        "expire_at": time.time() + seconds if seconds > 0 else 0,
+        "duration_text": product["duration"],
+        "bound_machine": "", "activated_at": 0,
+        "remark": f"在线购买-{product['name']}",
+    }
+    save(db)
+    expire_str = "永久" if seconds == 0 else time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + seconds))
+    return jsonify({"success": True, "key": key, "expire": expire_str})
+
+
+# ────────────────────────────────────────────────────────────
+# 购买页面
+# ────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/shop", methods=["GET"])
+def shop_page():
+    return """<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>购买授权</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.container{max-width:460px;width:100%;text-align:center}
+h1{color:#f8fafc;margin-bottom:4px}
+.sub{color:#94a3b8;font-size:14px;margin-bottom:20px}
+.product{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;margin-bottom:8px}
+.product:hover{border-color:#3b82f6}
+.product.selected{border-color:#22c55e;background:#14532d}
+.name{font-size:15px}
+.price{font-size:18px;font-weight:bold;color:#22c55e}
+.qr-box{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin:12px 0;display:none}
+.qr-box img{max-width:200px}
+.qr-box .tip{color:#94a3b8;font-size:12px;margin-top:6px}
+.btn{background:#22c55e;border:none;border-radius:6px;color:white;font-size:16px;font-weight:bold;padding:12px;width:100%;cursor:pointer;display:none;margin-top:8px}
+.btn:hover{background:#16a34a}
+.btn:disabled{opacity:0.5}
+.result{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin-top:12px;display:none}
+.result .key{color:#f59e0b;font-size:24px;font-weight:bold;letter-spacing:2px;margin:8px 0}
+.loading{color:#94a3b8;margin-top:8px;display:none}
+</style></head>
+<body>
+<div class="container">
+<h1>🔑 A股自动交易系统</h1>
+<p class="sub">选择时长 → 扫码付款 → 自动获取授权码</p>
+<div id="products"></div>
+<div class="qr-box" id="qrBox"><img id="qrImg"><p class="tip">扫码付款后点击下方按钮</p></div>
+<button class="btn" id="btnBuy" onclick="buy()">我已付款，获取授权码</button>
+<div class="loading" id="loading">⏳ 正在生成...</div>
+<div class="result" id="result">
+<p style="color:#22c55e;font-size:16px">✅ 购买成功！</p>
+<p style="color:#94a3b8;font-size:13px">授权码：</p>
+<p class="key" id="keyDisplay"></p>
+<p class="tip" style="font-size:12px" id="expDisplay"></p>
+</div>
+</div>
+<script>
+let pid = null;
+fetch('/api/auth/products').then(r=>r.json()).then(d=>{
+    document.getElementById('products').innerHTML = d.products.map(p =>
+        '<div class=product onclick="sel('+p.id+',this)"><span class=name>'+p.name+'</span><span class=price>'+p.price+' 元</span></div>'
+    ).join('');
+    if(d.has_qrcode) document.getElementById('qrImg').src='/api/auth/qrcode?'+Date.now();
+});
+function sel(id,el){
+    document.querySelectorAll('.product').forEach(p=>p.classList.remove('selected'));
+    el.classList.add('selected'); pid=id;
+    document.getElementById('qrBox').style.display='block';
+    document.getElementById('btnBuy').style.display='block';
+    document.getElementById('result').style.display='none';
+}
+async function buy(){
+    if(!pid) return;
+    document.getElementById('btnBuy').disabled=true;
+    document.getElementById('loading').style.display='block';
+    const r=await fetch('/api/auth/buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_id:pid})});
+    const d=await r.json();
+    document.getElementById('loading').style.display='none';
+    if(d.success){
+        document.getElementById('keyDisplay').textContent=d.key;
+        document.getElementById('expDisplay').textContent='有效期至: '+d.expire;
+        document.getElementById('result').style.display='block';
+        document.getElementById('qrBox').style.display='none';
+        document.getElementById('btnBuy').style.display='none';
+    }else alert(d.message);
+}
+</script>
+</body></html>"""
+
+
+# ────────────────────────────────────────────────────────────
 # 管理后台网页
 # ────────────────────────────────────────────────────────────
 
@@ -258,10 +400,16 @@ th { color:#94a3b8; font-weight:500; font-size:12px; text-transform:uppercase; }
 <button class="btn" onclick="document.getElementById('qrInput').click()">选择图片</button>
 <button class="btn btn-success" onclick="uploadQR()">上传</button>
 </div>
-<div class="row" id="qrPreview" style="display:none;">
-<img id="qrImg" style="max-width:180px;border:2px solid #475569;border-radius:4px;">
-</div>
+<div class="row" id="qrPreview" style="display:none;"><img id="qrImg" style="max-width:180px;border:2px solid #475569;border-radius:4px;"></div>
 <div id="qrStatus"></div>
+</div>
+
+<div class="card">
+<h3>🛒 商品配置</h3>
+<p class="sub" style="margin-bottom:8px">客户在购买页面看到的商品列表</p>
+<div id="productList"></div>
+<button class="btn btn-success" onclick="saveProducts()" style="margin-top:8px">保存</button>
+<div id="productStatus"></div>
 </div>
 
 <div class="card">
@@ -329,7 +477,19 @@ async function loadQR() {
     const r = await fetch('/api/auth/qrcode');
     if (r.ok) { document.getElementById('qrImg').src = '/api/auth/qrcode?' + Date.now(); document.getElementById('qrPreview').style.display = 'block'; }
 }
-loadQR();
+async function loadProducts() {
+    const r = await fetch('/api/auth/products'); const d = await r.json(); if(!d.success) return;
+    const list = document.getElementById('productList');
+    list.innerHTML = d.products.map((p,i) => '<div class=row><input type=text value="'+p.name+'" style=width:100px id=pn_'+i+'><select id=pd_'+i+'><option value=1h'+(p.duration=='1h'?' selected':'')+'>1h</option><option value=1d'+(p.duration=='1d'?' selected':'')+'>1d</option><option value=7d'+(p.duration=='7d'?' selected':'')+'>7d</option><option value=30d'+(p.duration=='30d'?' selected':'')+'>30d</option><option value=365d'+(p.duration=='365d'?' selected':'')+'>365d</option><option value=永久'+(p.duration=='永久'?' selected':'')+'>永久</option></select><input type=text value='+p.price+' style=width:60px id=pp_'+i+'><button class="btn btn-danger" style="padding:4px 8px;font-size:12px" onclick="this.parentElement.remove()">删</button></div>').join('');
+    window._pc = d.products.length;
+}
+async function saveProducts() {
+    const n = document.querySelectorAll('#productList .row').length; const ps = [];
+    for(let i=0;i<n;i++){const n=document.getElementById('pn_'+i)?.value,d=document.getElementById('pd_'+i)?.value,p=document.getElementById('pp_'+i)?.value;if(n&&d&&p)ps.push({id:i+1,name:n,duration:d,price:parseFloat(p)});}
+    const r = await fetch('/api/auth/products/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_key:PWD,products:ps})});
+    const j = await r.json(); document.getElementById('productStatus').innerHTML = j.success ? '✅ 已保存' : '❌ 失败';
+}
+loadQR(); loadProducts();
 loadList();
 </script>
 </body></html>"""
