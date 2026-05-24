@@ -48,6 +48,7 @@ from autotrader_app.backtest.engine import BacktestEngine
 from autotrader_app.broker import create_broker
 from autotrader_app.config import BASE_DIR, check_config, get_settings
 from autotrader_app.data.providers import DataProviderFactory
+from autotrader_app.risk.risk_manager import RiskManager
 from autotrader_app.services.scheduler_service import SchedulerService
 from autotrader_app.database import get_session
 from autotrader_app.models import OrderSide
@@ -237,6 +238,7 @@ class MainWindow(QMainWindow):
         self.broker_type_label = "实盘" if self._is_live_trading else "模拟"
         self.trading_service = TradingService(provider=self.provider, broker=self.broker)
         self.backtest_engine = BacktestEngine()
+        self.risk_manager = RiskManager(initial_cash=self._initial_cash)
 
         self.strategy_definitions: list[StrategyDefinition] = [
             # 双均线策略：短期 MA5 上穿/下穿 MA20 产生信号
@@ -300,6 +302,10 @@ class MainWindow(QMainWindow):
         self.scheduler.start()
         if self._is_live_trading:
             self.log("Scheduler: 交易时段自动启停已启用（09:20→11:30→12:55→15:05）")
+
+        # 实盘自动登录 EasyTrader
+        if self._is_live_trading:
+            self._auto_login_easytrader()
 
         self.log("系统启动完成。初始监控: " + ", ".join(self.watchlist))
 
@@ -661,10 +667,16 @@ class MainWindow(QMainWindow):
             self.refresh_account_views()
         except Exception:
             pass
-        # 权益曲线每 3 次心跳（≈15 s）刷新一次，避免频繁重绘
+
         self._heartbeat_counter = getattr(self, "_heartbeat_counter", 0) + 1
+
+        # 权益曲线每 3 次心跳（≈15 s）刷新一次
         if self._heartbeat_counter % 3 == 0:
             self.refresh_equity_curve()
+
+        # EasyTrader 心跳检查（每 60s = 12 次心跳）
+        if self._is_live_trading and self._heartbeat_counter % 12 == 0:
+            self._check_easytrader_connection()
 
     def _refresh_position_cache(self, force: bool = False) -> None:
         """缓存持仓数据，避免每个 tick 都查 DB。
@@ -995,6 +1007,48 @@ class MainWindow(QMainWindow):
         self.pause_button.setText("⏸ 暂停")
         self.log("▶ 下午开盘，引擎已恢复（13:00）")
 
+    # ── EasyTrader 自动登录与保活 ─────────────────────────
+
+    def _auto_login_easytrader(self) -> None:
+        """GUI 启动时自动连接 EasyTrader 客户端。"""
+        if not self._is_live_trading:
+            return
+        if not hasattr(self.broker, 'login'):
+            return
+
+        s = get_settings()
+        if not s.easytrader_account or not s.easytrader_exe_path:
+            self.log("⚠️ 实盘模式但 EasyTrader 配置不完整，请到配置页面设置")
+            return
+
+        self.log("⏳ 正在自动连接 EasyTrader 客户端...")
+        try:
+            success = self.broker.login(
+                account=s.easytrader_account,
+                password=s.easytrader_password,
+                exe_path=s.easytrader_exe_path,
+                broker_type=s.easytrader_broker_type or "ht",
+            )
+            if success:
+                self.log("✅ EasyTrader 客户端自动连接成功")
+            else:
+                self.log("❌ EasyTrader 客户端自动连接失败，请检查配置或手动登录")
+        except Exception as exc:
+            self.log(f"❌ EasyTrader 自动连接异常：{exc}")
+
+    def _check_easytrader_connection(self) -> None:
+        """心跳定期检查 EasyTrader 客户端连接状态。断开时重新连接。"""
+        if not self._is_live_trading:
+            return
+        if not hasattr(self.broker, 'is_connected'):
+            return
+        try:
+            if not self.broker.is_connected:
+                self.log("⚠️ EasyTrader 连接已断开，尝试重新连接...")
+                self._auto_login_easytrader()
+        except Exception as exc:
+            self.log(f"⚠️ EasyTrader 心跳检查异常：{exc}")
+
     # ── 紧急停止与安全 ───────────────────────────────────
 
     def _emergency_stop(self) -> None:
@@ -1250,6 +1304,8 @@ class MainWindow(QMainWindow):
                     f"🤖 [{strategy_name}] 自动买入 {symbol} "
                     f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
                 )
+                if result.status.value == "FILLED":
+                    self.risk_manager.record_trade(symbol, "BUY", decision.suggested_quantity * decision.price)
                 if self._is_live_trading:
                     from autotrader_app.logging_config import live_logger
                     live_logger().info(
@@ -1272,6 +1328,8 @@ class MainWindow(QMainWindow):
                     f"🤖 [{strategy_name}] 自动卖出 {symbol} "
                     f"x{decision.suggested_quantity} @ {decision.price:.2f} → {result.status.value}"
                 )
+                if result.status.value == "FILLED":
+                    self.risk_manager.record_trade(symbol, "SELL", decision.suggested_quantity * decision.price)
                 if self._is_live_trading:
                     from autotrader_app.logging_config import live_logger
                     live_logger().info(
@@ -1399,6 +1457,8 @@ class MainWindow(QMainWindow):
         try:
             result = self.trading_service.submit_manual_order(symbol, side, lot_size, last_price)
             self.log(f"手动 {side} {symbol} x{lot_size} @ {last_price:.2f} → {result.status.value} {result.reason}")
+            if result.status.value == "FILLED":
+                self.risk_manager.record_trade(symbol, side, lot_size * last_price)
             if self._is_live_trading:
                 from autotrader_app.logging_config import live_logger
                 live_logger().info(

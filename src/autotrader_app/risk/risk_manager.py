@@ -42,6 +42,7 @@ class RiskConfig:
     """风控参数配置（全量可持久化存储）。
 
     所有比例均为百分比形式（5.0 表示 5%）。
+    金额单位为人民币元。
     """
 
     # ── 单股止损/止盈 ──────────────────────────────────────
@@ -61,6 +62,19 @@ class RiskConfig:
 
     max_total_position_pct: float = 80.0
     """所有持仓市值之和不得超过总资产的该比例。"""
+
+    # ── 实盘安全保护 ────────────────────────────────────────
+    allowed_symbols: list[str] = field(default_factory=lambda: [])
+    """实盘模式允许交易的股票代码白名单（空=不限制）。"""
+
+    max_daily_buy_amount: float = 50_000.0
+    """单日最大买入总金额（实盘模式），0=不限制。"""
+
+    min_trade_interval_minutes: int = 1
+    """同一只股票两次交易最小间隔（分钟），0=不限制。"""
+
+    max_single_order_amount: float = 50_000.0
+    """单笔委托最大金额（实盘模式），0=不限制。"""
 
     # ── 全局开关 ────────────────────────────────────────────
     enabled: bool = True
@@ -140,8 +154,12 @@ class RiskManager:
         self.config: RiskConfig = config or RiskConfig()
         self._peak_assets: float = initial_cash
         self._initial_cash: float = initial_cash
-        # 熔断冷却：同一笔熔断不要重复触发
         self._drawdown_triggered: bool = False
+        # 每日交易统计
+        self._today_buy_amount: float = 0.0
+        self._today_date: str = ""
+        # 交易间隔跟踪
+        self._last_trade_time: dict[str, datetime] = {}
 
     # ──────────────────────────────────────────────────────
     # 公开 API
@@ -153,6 +171,9 @@ class RiskManager:
             self._initial_cash = initial_cash
         self._peak_assets = self._initial_cash
         self._drawdown_triggered = False
+        self._today_buy_amount = 0.0
+        self._today_date = ""
+        self._last_trade_time.clear()
         logger.info("RiskManager reset: peak_assets={:.2f}", self._peak_assets)
 
     def update_peak(self, current_assets: float) -> None:
@@ -199,6 +220,31 @@ class RiskManager:
                 f"超过上限 {self.config.max_total_position_pct:.0f}%"
             )
 
+        # ── 股票池白名单检查 ────────────────────────────
+        if self.config.allowed_symbols and symbol not in self.config.allowed_symbols:
+            return False, f"{symbol} 不在允许交易的白名单中"
+
+        # ── 单笔金额上限检查 ────────────────────────────
+        order_amount = quantity * price
+        if self.config.max_single_order_amount > 0 and order_amount > self.config.max_single_order_amount:
+            return False, (
+                f"单笔委托金额 {order_amount:.0f} 元超过上限 {self.config.max_single_order_amount:.0f} 元"
+            )
+
+        # ── 每日买入总额检查 ────────────────────────────
+        self._check_daily_reset()
+        if self.config.max_daily_buy_amount > 0:
+            new_daily = self._today_buy_amount + order_amount
+            if new_daily > self.config.max_daily_buy_amount:
+                return False, (
+                    f"当日累计买入将达 {new_daily:.0f} 元，超过上限 {self.config.max_daily_buy_amount:.0f} 元"
+                )
+
+        # ── 交易间隔检查 ────────────────────────────────
+        interval_ok, interval_msg = self._check_interval(symbol)
+        if not interval_ok:
+            return False, interval_msg
+
         # ── 单股仓位检查 ────────────────────────────────
         existing_qty = context.positions.get(symbol, 0)
         existing_price = context.latest_prices.get(symbol, price)
@@ -211,6 +257,45 @@ class RiskManager:
             )
 
         return True, "OK"
+
+    # ──────────────────────────────────────────────────────
+    # 实盘安全限制辅助方法
+    # ──────────────────────────────────────────────────────
+
+    def _check_daily_reset(self) -> None:
+        """检查是否需要重置每日统计数据。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._today_date:
+            self._today_buy_amount = 0.0
+            self._today_date = today
+
+    def _check_interval(self, symbol: str) -> tuple[bool, str]:
+        """检查同一股票的交易间隔限制。"""
+        if self.config.min_trade_interval_minutes <= 0:
+            return True, ""
+        last = self._last_trade_time.get(symbol)
+        if last is None:
+            return True, ""
+        elapsed = (datetime.now() - last).total_seconds() / 60
+        if elapsed < self.config.min_trade_interval_minutes:
+            return False, (
+                f"{symbol} 距上次交易仅 {elapsed:.1f} 分钟，"
+                f"不足最小间隔 {self.config.min_trade_interval_minutes} 分钟"
+            )
+        return True, ""
+
+    def record_trade(self, symbol: str, side: str, amount: float) -> None:
+        """记录一笔已完成交易（成交后调用，更新统计状态）。
+
+        Args:
+            symbol: 股票代码。
+            side:   "BUY" 或 "SELL"。
+            amount: 成交金额（quantity * price）。
+        """
+        self._last_trade_time[symbol] = datetime.now()
+        self._check_daily_reset()
+        if side.upper() == "BUY":
+            self._today_buy_amount += amount
 
     def scan_positions(
         self,
