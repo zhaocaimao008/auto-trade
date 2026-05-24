@@ -24,6 +24,13 @@ from loguru import logger
 from autotrader_app.broker.broker_base import BrokerBase
 from autotrader_app.models import FillResult, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
 
+# ── 实盘日志 ──────────────────────────────────────────────
+try:
+    from autotrader_app.logging_config import live_logger
+    _live_log = live_logger()
+except Exception:
+    _live_log = logger
+
 # ── Optional import: easytrader ────────────────────────────────────────
 try:
     import easytrader
@@ -107,6 +114,9 @@ class EasyTraderBroker(BrokerBase):
             self._user = easytrader.use(broker_type)
             self._user.connect(exe_path)  # type: ignore[attr-defined]
             logger.info("EasyTrader 客户端连接成功: broker={} account={}", broker_type, account)
+            _live_log.info("[登录] 客户端连接成功 broker={}", broker_type)
+            if self.is_live:
+                _live_log.warning("[风险] 实盘模式已启用，所有操作将发送真实委托")
             return True
         except Exception as exc:
             logger.error("EasyTrader 登录失败: {}", exc)
@@ -203,6 +213,7 @@ class EasyTraderBroker(BrokerBase):
                 )
 
             logger.info("[实盘] EasyTrader 下单成功: {} {} x{} @ {} → {}", cmd_side, order.symbol, order.quantity, order.price, result)
+            _live_log.info("[下单] {} {} x{} @ {}", cmd_side, order.symbol, order.quantity, order.price)
 
             # 解析 easytrader 返回结果
             order_result = OrderResult(

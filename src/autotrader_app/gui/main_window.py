@@ -48,6 +48,7 @@ from autotrader_app.backtest.engine import BacktestEngine
 from autotrader_app.broker import create_broker
 from autotrader_app.config import BASE_DIR, check_config, get_settings
 from autotrader_app.data.providers import DataProviderFactory
+from autotrader_app.services.scheduler_service import SchedulerService
 from autotrader_app.database import get_session
 from autotrader_app.models import OrderSide
 from autotrader_app.repositories import AccountRepository, OrderRepository, PositionRepository
@@ -267,6 +268,7 @@ class MainWindow(QMainWindow):
         self._position_cache: dict[str, dict] = {}  # symbol -> {quantity, avg_price}
         self._position_cache_ts: float = 0.0  # 上一次刷新持仓的时间戳
         self._live_warning_label: QLabel | None = None
+        self._trusted_mode: bool = False  # True 时实盘自动执行跳过二次确认
 
         self._build_menu()
         self._build_status_bar()
@@ -286,6 +288,19 @@ class MainWindow(QMainWindow):
         for warn in check_config():
             self.log(f"⚠️ {warn}")
         self._update_live_warning()
+
+        # 定时调度服务（按 A 股交易时段自动启停引擎）
+        self.scheduler = SchedulerService()
+        self.scheduler.set_engine_callbacks(
+            start=self.start_trading,
+            pause=self._scheduled_pause,
+            resume=self._scheduled_resume,
+            stop=self.stop_trading,
+        )
+        self.scheduler.start()
+        if self._is_live_trading:
+            self.log("Scheduler: 交易时段自动启停已启用（09:20→11:30→12:55→15:05）")
+
         self.log("系统启动完成。初始监控: " + ", ".join(self.watchlist))
 
     # ── 菜单 ────────────────────────────────────────────────
@@ -308,6 +323,21 @@ class MainWindow(QMainWindow):
         ex_act = QAction("导出日志", self)
         ex_act.triggered.connect(self.export_logs)
         ex_menu.addAction(ex_act)
+
+        # ⚡ 安全菜单（紧急停止 + 清仓 + 风控）
+        safety_menu = menu_bar.addMenu("⚡ 安全")
+        emergency_act = QAction("🛑 紧急停止引擎", self)
+        emergency_act.setShortcut("Ctrl+Shift+Escape")
+        emergency_act.triggered.connect(self._emergency_stop)
+        safety_menu.addAction(emergency_act)
+
+        panic_sell_act = QAction("⚠️ 清仓所有持仓", self)
+        panic_sell_act.triggered.connect(self._panic_sell_all)
+        safety_menu.addAction(panic_sell_act)
+
+        risk_cfg_act = QAction("风控参数设置", self)
+        risk_cfg_act.triggered.connect(self._open_risk_config_dialog)
+        safety_menu.addAction(risk_cfg_act)
 
     # ── 状态栏 ────────────────────────────────────────────
 
@@ -420,6 +450,8 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("▶ 启动引擎")
         self.pause_button = QPushButton("⏸ 暂停")
         self.stop_button = QPushButton("⏹ 停止")
+        self.trusted_checkbox = QCheckBox("自动执行免确认")
+        self.trusted_checkbox.setToolTip("启用后，实盘模式下策略自动执行不再弹窗确认（风控仍生效）")
         self.buy_button = QPushButton("模拟买入")
         self.sell_button = QPushButton("模拟卖出")
         self.pause_button.setEnabled(False)
@@ -444,6 +476,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.pause_button)
         button_row.addWidget(self.stop_button)
+        button_row.addWidget(self.trusted_checkbox)
         button_row.addStretch(1)
         button_row.addWidget(self.buy_button)
         button_row.addWidget(self.sell_button)
@@ -600,6 +633,7 @@ class MainWindow(QMainWindow):
         self.market_table.itemSelectionChanged.connect(self.on_market_selection_changed)
 
         self.start_button.clicked.connect(self.start_trading)
+        self.trusted_checkbox.toggled.connect(lambda checked: setattr(self, '_trusted_mode', checked))
         self.pause_button.clicked.connect(self.pause_trading)
         self.stop_button.clicked.connect(self.stop_trading)
         self.buy_button.clicked.connect(lambda: self.submit_manual_order("BUY"))
@@ -928,6 +962,120 @@ class MainWindow(QMainWindow):
         self.pause_button.setText("⏸ 暂停")
         self.log("━━━━━ 交易引擎已停止 ━━━━━")
 
+    # ── 定时调度回调 ─────────────────────────────────────
+
+    def _scheduled_pause(self) -> None:
+        """定时调度调用的暂停（不修改 is_running 状态）。"""
+        if not self.is_running or self.is_paused:
+            return
+        self.is_paused = True
+        self.market_status_label.setText("状态：⏸ 午间休市")
+        self.pause_button.setText("▶ 继续")
+        self.log("⏸ 午间休市，引擎已暂停（11:30）")
+
+    def _scheduled_resume(self) -> None:
+        """定时调度调用的恢复。"""
+        if not self.is_running or not self.is_paused:
+            return
+        self.is_paused = False
+        self.market_status_label.setText("状态：▶ 运行中")
+        self.pause_button.setText("⏸ 暂停")
+        self.log("▶ 下午开盘，引擎已恢复（13:00）")
+
+    # ── 紧急停止与安全 ───────────────────────────────────
+
+    def _emergency_stop(self) -> None:
+        """紧急停止引擎（快捷键 Ctrl+Shift+Escape）。"""
+        resp = QMessageBox.critical(
+            self,
+            "🛑 紧急停止",
+            "是否立即停止交易引擎？\n\n引擎停止后不会自动执行任何策略。\n现有的委托不会被撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        self.stop_trading()
+        if self._is_live_trading:
+            from autotrader_app.logging_config import live_logger
+            live_logger().warning("[紧急停止] 用户触发紧急停止，引擎已关闭")
+        self.log("🛑 紧急停止已执行")
+
+    def _panic_sell_all(self) -> None:
+        """清仓所有持仓。"""
+        try:
+            with get_session() as session:
+                positions = PositionRepository(session).list_all()
+        except Exception:
+            positions = []
+
+        if not positions:
+            QMessageBox.information(self, "提示", "当前无持仓。")
+            return
+
+        total = sum(p.quantity for p in positions)
+        msg = (
+            f"即将发起平仓委托：\n\n共 {len(positions)} 只股票，{total} 股\n\n"
+            + ("\n⚠️ 实盘模式，将发送真实卖出委托！" if self._is_live_trading else "")
+        )
+        resp = QMessageBox.warning(
+            self, "清仓确认", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        for pos in positions:
+            try:
+                bars = self.latest_bar_cache.get(pos.symbol)
+                price = float(bars.iloc[-1]["close"]) if bars is not None and not bars.empty else pos.avg_price
+                result = self.trading_service.submit_manual_order(
+                    pos.symbol, "SELL", pos.quantity, price,
+                    strategy_name="emergency",
+                )
+                self.log(f"清仓卖出 {pos.symbol} x{pos.quantity} @ {price:.2f} → {result.status.value}")
+            except Exception as exc:
+                self.log(f"清仓 {pos.symbol} 失败：{exc}")
+
+    def _open_risk_config_dialog(self) -> None:
+        """打开风控参数设置对话框。"""
+        from autotrader_app.risk.risk_manager import RiskConfig
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("风控参数设置")
+        dialog.resize(380, 320)
+
+        default_cfg = RiskConfig()
+        sl = QLineEdit(str(default_cfg.stop_loss_pct))
+        tp = QLineEdit(str(default_cfg.take_profit_pct))
+        md = QLineEdit(str(default_cfg.max_drawdown_pct))
+        sp = QLineEdit(str(default_cfg.max_single_position_pct))
+        tpct = QLineEdit(str(default_cfg.max_total_position_pct))
+        enabled_cb = QCheckBox()
+        enabled_cb.setChecked(default_cfg.enabled)
+
+        form = QFormLayout()
+        form.addRow("止损比例 (%)", sl)
+        form.addRow("止盈比例 (%)", tp)
+        form.addRow("最大回撤 (%)", md)
+        form.addRow("单股仓位上限 (%)", sp)
+        form.addRow("总仓位上限 (%)", tpct)
+        form.addRow("风控启用", enabled_cb)
+
+        note = QLabel("注：当前为演示面板，参数调整需重启生效。")
+        note.setStyleSheet("color:#9ca3af; font-size:11px;")
+
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn.accepted.connect(dialog.accept)
+        btn.rejected.connect(dialog.reject)
+
+        layout = QVBoxLayout(dialog)
+        layout.addLayout(form)
+        layout.addWidget(note)
+        layout.addWidget(btn)
+        dialog.exec()
+
     # ── 策略评估与自动执行 ─────────────────────────────────
 
     def _evaluate_all_strategies(self) -> None:
@@ -1050,8 +1198,8 @@ class MainWindow(QMainWindow):
             f"{symbol} x{decision.suggested_quantity} @ {decision.price:.2f}"
         )
 
-        # 实盘模式下自动执行前弹窗确认
-        if not self._confirm_live_order(desc):
+        # 实盘模式下自动执行前弹窗确认（trusted 模式启用时跳过）
+        if not self._confirm_live_order(desc, trusted=True):
             self.log(f"用户取消自动执行：{desc}")
             return
 
@@ -1136,16 +1284,19 @@ class MainWindow(QMainWindow):
 
     # ── 手动下单 ───────────────────────────────────────────
 
-    def _confirm_live_order(self, action_desc: str) -> bool:
+    def _confirm_live_order(self, action_desc: str, trusted: bool = False) -> bool:
         """实盘模式二次确认弹窗。
 
         Args:
             action_desc: 操作描述（如"买入 000001 x100 @ 12.50"）。
+            trusted:     True 时跳过弹窗（引擎自动执行且 _trusted_mode 启用）。
 
         Returns:
-            True 用户确认，False 取消。
+            True 用户确认或 trusted=True，False 取消。
         """
         if not self._is_live_trading:
+            return True
+        if trusted and self._trusted_mode:
             return True
 
         resp = QMessageBox.warning(
