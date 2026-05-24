@@ -3,8 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from autotrader_app.risk.risk_manager import RiskManager
 
 
 class StrategyMode(str, Enum):
@@ -62,6 +66,7 @@ class StrategyBase(ABC):
         symbol_list: list[str] | None = None,
         position_ratio: float = 0.2,
         mode: StrategyMode = StrategyMode.REALTIME,
+        risk_manager: "RiskManager | None" = None,
     ) -> None:
         self.symbol_list = symbol_list or []
         self.position_ratio = position_ratio
@@ -70,6 +75,9 @@ class StrategyBase(ABC):
         # 简单风控约束：单股不超过总资金 30%，整体仓位不超过 80%。
         self.max_single_position_ratio = 0.30
         self.max_total_position_ratio = 0.80
+
+        # 外部注入的 RiskManager（可选）；注入后买入前会自动调用仓位检查
+        self.risk_manager: "RiskManager | None" = risk_manager
 
     def set_mode(self, mode: StrategyMode) -> None:
         """切换运行模式。"""
@@ -117,8 +125,15 @@ class StrategyBase(ABC):
         return max(lot_quantity, 0)
 
     def run(self, symbol: str, bars: pd.DataFrame, context: StrategyContext) -> StrategyDecision:
-        """统一策略执行入口。"""
+        """统一策略执行入口。
 
+        执行顺序：
+        1. 校验股票池；
+        2. 预处理 K 线数据；
+        3. 调用 generate_signal 生成信号；
+        4. 若挂载了 RiskManager，用其对买入信号做仓位二次拦截；
+           对 HOLD 信号检查是否需要强制止损/止盈平仓（覆盖为 SELL）。
+        """
         if not self.validate_symbol(symbol):
             return StrategyDecision(
                 symbol=symbol,
@@ -128,7 +143,78 @@ class StrategyBase(ABC):
             )
 
         bars = self.prepare_data(bars)
-        return self.generate_signal(symbol, bars, context)
+        decision = self.generate_signal(symbol, bars, context)
+
+        # ── RiskManager 二次检查 ──────────────────────────────
+        if self.risk_manager is not None and self.risk_manager.config.enabled:
+            decision = self._apply_risk_check(symbol, decision, context)
+
+        return decision
+
+    def _apply_risk_check(
+        self,
+        symbol: str,
+        decision: StrategyDecision,
+        context: StrategyContext,
+    ) -> StrategyDecision:
+        """将 RiskManager 的检查结果叠加到策略决策上。
+
+        规则：
+        · BUY  → 调用 check_entry 做仓位拦截；超限时降级为 HOLD。
+        · HOLD → 检查该股票当前持仓是否触发止损/止盈；触发时升级为 SELL。
+        · SELL → 不干预（策略已决定卖出）。
+        """
+        rm = self.risk_manager
+        assert rm is not None
+
+        if decision.signal == StrategySignal.BUY:
+            ok, reason = rm.check_entry(
+                symbol,
+                decision.price,
+                decision.suggested_quantity,
+                context,
+            )
+            if not ok:
+                return StrategyDecision(
+                    symbol=symbol,
+                    signal=StrategySignal.HOLD,
+                    reason=f"风控拦截买入：{reason}",
+                    price=decision.price,
+                    mode=self.mode,
+                )
+
+        elif decision.signal == StrategySignal.HOLD:
+            # 用最新价检查该股票是否需要止损/止盈
+            current_price = context.latest_prices.get(symbol, 0.0)
+            avg_price = 0.0
+            qty = context.positions.get(symbol, 0)
+            if qty > 0 and current_price > 0:
+                # avg_price 从 latest_prices 取不到时尝试反推（模拟模式下 context 没有 avg_price 字段）
+                # 单独构造一条最小 positions 列表
+                pos_list = [{"symbol": symbol, "quantity": qty, "avg_price": context.latest_prices.get(symbol, 0.0)}]
+                # 尝试从 context 里获取真实成本（如果调用方填充了 avg_prices 字段）
+                avg_price_map: dict[str, float] = getattr(context, "avg_prices", {})
+                if symbol in avg_price_map:
+                    pos_list[0]["avg_price"] = avg_price_map[symbol]
+
+                stop_signals = rm.scan_positions(
+                    pos_list,
+                    {symbol: current_price},
+                    context.total_capital,
+                )
+                if stop_signals:
+                    sig = stop_signals[0]
+                    return StrategyDecision(
+                        symbol=symbol,
+                        signal=StrategySignal.SELL,
+                        reason=sig.reason,
+                        target_ratio=0.0,
+                        suggested_quantity=qty,
+                        price=current_price,
+                        mode=self.mode,
+                    )
+
+        return decision
 
     def prepare_data(self, bars: pd.DataFrame) -> pd.DataFrame:
         """预处理行情数据。"""

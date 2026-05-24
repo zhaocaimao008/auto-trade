@@ -1,6 +1,36 @@
-auto_trader.db
-src/auto_trader.db
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
 .env
-.venv/
-*.pyc
+.env.local
+
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/*.log
+
+# Generated
+*.egg
