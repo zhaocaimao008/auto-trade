@@ -1561,7 +1561,9 @@ class MainWindow(QMainWindow):
         if self._is_live_trading:
             try:
                 with get_session() as session:
-                    current_positions = PositionRepository(session).list_all()
+                    position_rows = PositionRepository(session).list_all()
+                    session.close()
+                    current_positions = [(p.symbol, p.quantity, p.avg_price) for p in position_rows]
                 current_cash = float(getattr(self.broker.account, 'cash', 0))
                 total_amount = lot_size * last_price
                 preview = (
@@ -1575,8 +1577,8 @@ class MainWindow(QMainWindow):
                     preview += f"预计持仓市值增加：{total_amount:,.2f}"
                 else:
                     preview += f"预计成交后资金：{current_cash + total_amount:,.2f}\n"
-                    existing = next((p for p in current_positions if p.symbol == symbol), None)
-                    preview += f"当前 {symbol} 持仓：{existing.quantity if existing else 0} 股"
+                    existing = next((p for p in current_positions if p[0] == symbol), None)
+                    preview += f"当前 {symbol} 持仓：{existing[1] if existing else 0} 股"
                 resp = QMessageBox.information(
                     self, "资金影响预览", preview,
                     QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
