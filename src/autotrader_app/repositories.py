@@ -125,3 +125,22 @@ class AccountRepository:
     def latest(self) -> AccountSnapshot | None:
         stmt = select(AccountSnapshot).order_by(AccountSnapshot.created_at.desc()).limit(1)
         return self.session.scalar(stmt)
+
+    def list_all(self, limit: int = 2000) -> list[AccountSnapshot]:
+        """按时间升序返回全部快照（用于绘制权益曲线）。"""
+        stmt = (
+            select(AccountSnapshot)
+            .order_by(AccountSnapshot.created_at.asc())
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt))
+
+    def list_since(self, since: datetime, limit: int = 2000) -> list[AccountSnapshot]:
+        """返回 since 之后的快照（按时间升序）。"""
+        stmt = (
+            select(AccountSnapshot)
+            .where(AccountSnapshot.created_at >= since)
+            .order_by(AccountSnapshot.created_at.asc())
+            .limit(limit)
+        )
+        return list(self.session.scalars(stmt))

@@ -168,6 +168,41 @@ class MockBroker(BrokerBase):
             status=OrderStatus.FILLED,
         ), fills
 
+    def get_equity_history(self, limit: int = 2000) -> pd.DataFrame:
+        """返回账户净值历史，用于绘制权益曲线。
+
+        列：created_at, cash, market_value, total_assets
+        始终在末尾追加一条"当前实时"记录，确保曲线延伸至当下。
+        """
+        # 在 session 内直接转为字典，避免 session 关闭后 DetachedInstanceError
+        with get_session() as session:
+            rows = AccountRepository(session).list_all(limit=limit)
+            records = [
+                {
+                    "created_at": row.created_at,
+                    "cash": row.cash,
+                    "market_value": row.market_value,
+                    "total_assets": row.total_assets,
+                }
+                for row in rows
+            ]
+
+        if not records:
+            # 无历史快照时返回空 DataFrame（GUI 侧显示占位提示）
+            return pd.DataFrame(columns=["created_at", "cash", "market_value", "total_assets"])
+
+        df = pd.DataFrame(records)
+
+        # 追加实时当前状态（不入库，仅供展示）
+        realtime = {
+            "created_at": datetime.now(),
+            "cash": self.account.cash,
+            "market_value": self.account.market_value,
+            "total_assets": self.account.total_assets,
+        }
+        df = pd.concat([df, pd.DataFrame([realtime])], ignore_index=True)
+        return df
+
     def _refresh_market_value(self, repo: PositionRepository) -> None:
         total = 0.0
         for position in repo.list_all():
